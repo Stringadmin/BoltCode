@@ -1,0 +1,68 @@
+# GoReleaser config for BoltCode.
+# Build cross-platform binaries and publish them to GitHub Releases on tag push.
+# Docs: https://goreleaser.com
+version: 2
+
+project_name: boltcode
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: boltcode
+    main: ./
+    binary: boltcode
+    # Target every platform a developer is likely to run a CLI on.
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Strip debug info and embed the version (read from the git tag) so the
+    # binary stays small and reports its version correctly.
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+    env:
+      - CGO_ENABLED=0
+
+archives:
+  # Format: BoltCode_v0.1.0_linux_amd64.tar.gz (.zip on Windows)
+  - id: default
+    name_template: >-
+      BoltCode_{{ .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+      - "Merge branch"
+
+release:
+  github:
+    owner: Stringadmin
+    name: BoltCode
+  draft: false
+  prerelease: auto
+  name_template: "BoltCode {{ .Version }}"

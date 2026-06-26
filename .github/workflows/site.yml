@@ -1,0 +1,45 @@
+# 构建官网(site/)并部署到 GitHub Pages。
+# push 到 main 时触发:安装依赖 → astro build → 把 dist/ 推到 gh-pages 分支。
+name: Deploy Site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch: # 允许手动触发
+
+permissions:
+  contents: write # 推到 gh-pages 分支需要写权限
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm ci || npm install
+
+      - name: Build with Astro
+        working-directory: site
+        run: npm run build
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site/dist
+          publish_branch: gh-pages
+          # 保留历史,避免每次 force-push 丢失部署记录
+          force_orphan: false

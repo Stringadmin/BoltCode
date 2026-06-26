@@ -1,0 +1,66 @@
+---
+// Layout:页面 HTML 骨架。meta、字体、favicon 在这里统一管理。
+const {
+  title = 'BoltCode — 内置 AI 编程 Agent + git-native 团队协作',
+  description = 'BoltCode 是一个内置 AI 编程 Agent 的 CLI 工具,支持 solo 单人模式和 team 多人×多AI 协作模式。AI 永不 merge,人类把关。',
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="generator" content={Astro.generator} />
+
+    <title>{title}</title>
+    <meta name="description" content={description} />
+
+    <!-- Open Graph / 社交分享 -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="BoltCode — 内置 AI 编程 Agent + 团队协作" />
+    <meta property="og:description" content="Solo 模式开箱即用,Team 模式多 AI 并行 + 人类审查。AI 永不 merge。" />
+    <meta property="og:url" content="https://stringtest.top" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body class="bg-bg text-ink font-sans antialiased">
+    <slot />
+  </body>
+</html>
+
+<style is:global>
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 5rem;
+  }
+  body {
+    margin: 0;
+    /* 去掉默认行高过大,排版更紧凑有控制感 */
+    line-height: 1.5;
+  }
+  ::selection {
+    background: #6366F1;
+    color: #FAFAFA;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0D0D0F;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #262629;
+    border-radius: 0;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a3e;
+  }
+</style>

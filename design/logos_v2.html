@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>BoltCode Logo v2 — 功能强化版</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #0f1117; color: #c0caf5; padding: 30px;
+  }
+  h1 { color: #7aa2f7; margin-bottom: 6px; }
+  .sub { color: #565f89; font-size: 13px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; max-width: 940px; }
+  .card { background: #1a1b26; border-radius: 12px; padding: 22px; border: 1px solid #2a2e44; }
+  .card h3 { color: #e0af68; margin-bottom: 4px; font-size: 15px; }
+  .card .desc { color: #9aa5ce; font-size: 12px; margin-bottom: 14px; line-height: 1.55; }
+  .logo-box { border-radius: 8px; padding: 20px; display: flex; align-items: center; justify-content: center; min-height: 150px; }
+  .logo-box.dark { background: #0d1117; }
+  .logo-box.light { background: #fff; }
+  .actions { margin-top: 12px; }
+  .btn { padding: 5px 11px; font-size: 11px; cursor: pointer; border: none; border-radius: 5px; background: #3b4261; color: #c0caf5; }
+  .btn:hover { background: #4c5375; }
+  .tag { display:inline-block; font-size:11px; color:#565f89; margin-top:8px; }
+</style>
+</head>
+<body>
+  <h1>BoltCode Logo v2 — 功能强化版</h1>
+  <div class="sub">在 C（终端）基础上强化"AI 编程 + 协作审查 + 闪电"。4 款变体，点导出下载 SVG。</div>
+
+  <div class="grid">
+
+    <!-- C1: 终端 + 闪电 + 代码括号 + 协作节点 -->
+    <div class="card">
+      <h3>C1. 终端·闪电·协作链</h3>
+      <div class="desc">终端窗口框 + 绿色提示符（CLI）+ 蓝色闪电（bolt/快速）+ 右侧协作节点链（多人协作）。三大功能一次表达。</div>
+      <div class="logo-box dark">
+        <svg width="200" height="110" viewBox="0 0 200 110" id="logoC1">
+          <rect x="5" y="15" width="140" height="90" rx="8" fill="#1a1b26" stroke="#7aa2f7" stroke-width="2.5"/>
+          <circle cx="18" cy="27" r="3" fill="#f7768e"/>
+          <circle cx="30" cy="27" r="3" fill="#e0af68"/>
+          <circle cx="42" cy="27" r="3" fill="#9ece6a"/>
+          <!-- prompt + lightning as "code" -->
+          <path d="M22 55 L14 65 L22 75" stroke="#9ece6a" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M55 48 L40 70 L52 70 L46 88 L70 62 L56 62 Z" fill="#7aa2f7"/>
+          <text x="80" y="80" font-family="monospace" font-size="26" font-weight="bold" fill="#bb9af7">{ }</text>
+          <!-- collaboration node chain -->
+          <line x1="150" y1="60" x2="185" y2="40" stroke="#565f89" stroke-width="2"/>
+          <line x1="150" y1="60" x2="185" y2="60" stroke="#565f89" stroke-width="2"/>
+          <line x1="150" y1="60" x2="185" y2="80" stroke="#565f89" stroke-width="2"/>
+          <circle cx="150" cy="60" r="7" fill="#7aa2f7"/>
+          <circle cx="185" cy="40" r="6" fill="#9ece6a"/>
+          <circle cx="185" cy="60" r="6" fill="#e0af68"/>
+          <circle cx="185" cy="80" r="6" fill="#bb9af7"/>
+        </svg>
+      </div>
+      <div class="actions"><button class="btn" onclick="exportSvg('logoC1','boltcode-C1')">导出 SVG</button></div>
+    </div>
+
+    <!-- C2: 终端 + 大闪电劈开代码 -->
+    <div class="card">
+      <h3>C2. 闪电劈码</h3>
+      <div class="desc">终端框内，一道大闪电劈开 &lt;/&gt; 代码符号——AI 闪电般改写代码。视觉冲击强，功能指向明确（编程）。</div>
+      <div class="logo-box dark">
+        <svg width="160" height="120" viewBox="0 0 160 120" id="logoC2">
+          <rect x="5" y="10" width="150" height="105" rx="8" fill="#1a1b26" stroke="#7aa2f7" stroke-width="2.5"/>
+          <circle cx="18" cy="22" r="3" fill="#f7768e"/>
+          <circle cx="30" cy="22" r="3" fill="#e0af68"/>
+          <circle cx="42" cy="22" r="3" fill="#9ece6a"/>
+          <!-- </> split by lightning -->
+          <text x="25" y="85" font-family="monospace" font-size="40" font-weight="bold" fill="#3b4261">&lt;/</text>
+          <text x="105" y="85" font-family="monospace" font-size="40" font-weight="bold" fill="#3b4261">&gt;</text>
+          <path d="M80 30 L60 70 L74 70 L66 100 L92 60 L76 60 Z" fill="#7aa2f7"/>
+          <path d="M80 30 L60 70 L74 70 L66 100 L92 60 L76 60 Z" fill="none" stroke="#bb9af7" stroke-width="1.5"/>
+        </svg>
+      </div>
+      <div class="actions"><button class="btn" onclick="exportSvg('logoC2','boltcode-C2')">导出 SVG</button></div>
+    </div>
+
+    <!-- C3: 终端 + AI 芯片 + 闪电 -->
+    <div class="card">
+      <h3>C3. AI 芯片闪电</h3>
+      <div class="desc">终端框 + 中央 AI 芯片（引脚=agent 能力）+ 芯片内闪电。强调"内置 AI agent"这一核心卖点，闪电即 bolt。</div>
+      <div class="logo-box dark">
+        <svg width="160" height="120" viewBox="0 0 160 120" id="logoC3">
+          <rect x="5" y="10" width="150" height="105" rx="8" fill="#1a1b26" stroke="#7aa2f7" stroke-width="2.5"/>
+          <circle cx="18" cy="22" r="3" fill="#f7768e"/>
+          <circle cx="30" cy="22" r="3" fill="#e0af68"/>
+          <circle cx="42" cy="22" r="3" fill="#9ece6a"/>
+          <!-- AI chip -->
+          <rect x="55" y="45" width="50" height="50" rx="8" fill="none" stroke="#9ece6a" stroke-width="2.5"/>
+          <!-- chip pins -->
+          <line x1="65" y1="40" x2="65" y2="45" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="80" y1="40" x2="80" y2="45" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="95" y1="40" x2="95" y2="45" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="65" y1="95" x2="65" y2="100" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="80" y1="95" x2="80" y2="100" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="95" y1="95" x2="95" y2="100" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="50" y1="58" x2="55" y2="58" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="50" y1="70" x2="55" y2="70" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="50" y1="82" x2="55" y2="82" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="105" y1="58" x2="110" y2="58" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="105" y1="70" x2="110" y2="70" stroke="#9ece6a" stroke-width="2"/>
+          <line x1="105" y1="82" x2="110" y2="82" stroke="#9ece6a" stroke-width="2"/>
+          <!-- lightning inside chip -->
+          <path d="M83 52 L72 72 L80 72 L76 88 L90 68 L81 68 Z" fill="#7aa2f7"/>
+        </svg>
+      </div>
+      <div class="actions"><button class="btn" onclick="exportSvg('logoC3','boltcode-C3')">导出 SVG</button></div>
+    </div>
+
+    <!-- C4: 终端 + 闪电 + git 分支(协作) -->
+    <div class="card">
+      <h3>C4. 闪电·Git 分支</h3>
+      <div class="desc">终端框 + 闪电 + git 分支图（worktree 隔离协作的视觉化）。直接呼应"git-native 多人协作 + AI 闪电开发"。</div>
+      <div class="logo-box dark">
+        <svg width="170" height="120" viewBox="0 0 170 120" id="logoC4">
+          <rect x="5" y="10" width="160" height="105" rx="8" fill="#1a1b26" stroke="#7aa2f7" stroke-width="2.5"/>
+          <circle cx="18" cy="22" r="3" fill="#f7768e"/>
+          <circle cx="30" cy="22" r="3" fill="#e0af68"/>
+          <circle cx="42" cy="22" r="3" fill="#9ece6a"/>
+          <!-- lightning -->
+          <path d="M48 45 L35 75 L47 75 L40 95 L65 62 L50 62 Z" fill="#7aa2f7"/>
+          <!-- git branch -->
+          <path d="M90 90 C90 90 90 40 110 40" stroke="#9ece6a" stroke-width="2.5" fill="none"/>
+          <line x1="90" y1="50" x2="90" y2="90" stroke="#bb9af7" stroke-width="2.5"/>
+          <circle cx="90" cy="45" r="6" fill="#bb9af7"/>
+          <circle cx="90" cy="90" r="6" fill="#7aa2f7"/>
+          <circle cx="110" cy="40" r="6" fill="#9ece6a"/>
+          <!-- second branch -->
+          <path d="M90 70 C90 70 90 55 105 55" stroke="#e0af68" stroke-width="2.5" fill="none"/>
+          <circle cx="105" cy="55" r="5" fill="#e0af68"/>
+        </svg>
+      </div>
+      <div class="actions"><button class="btn" onclick="exportSvg('logoC4','boltcode-C4')">导出 SVG</button></div>
+    </div>
+
+  </div>
+
+<script>
+function exportSvg(id, name) {
+  const svg = document.getElementById(id);
+  const clone = svg.cloneNode(true);
+  clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+  const data = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([data], {type:'image/svg+xml'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name + '.svg'; a.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>

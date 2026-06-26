@@ -1,0 +1,240 @@
+---
+import Layout from '../layouts/Layout.astro';
+
+const GITHUB_URL = 'https://github.com/Stringadmin/BoltCode';
+const DOCS_URL = 'https://github.com/Stringadmin/BoltCode/blob/main/docs/manual.md';
+const INSTALL_CMD = 'curl -fsSL https://stringtest.top/install.sh | sh';
+---
+
+<Layout>
+  <main class="mx-auto max-w-3xl px-6">
+
+    <!-- 导航 -->
+    <nav class="flex items-center justify-between py-6">
+      <a href="#" class="font-mono text-sm font-semibold tracking-tightish text-ink">
+        <span class="text-accent">⚡</span> BoltCode
+      </a>
+      <div class="flex items-center gap-6 text-sm text-dim">
+        <a href="#features" class="transition hover:text-ink">特性</a>
+        <a href="#start" class="transition hover:text-ink">上手</a>
+        <a href={DOCS_URL} class="transition hover:text-ink">文档</a>
+        <a href={GITHUB_URL} class="text-ink transition hover:text-accent">GitHub ↗</a>
+      </div>
+    </nav>
+
+    <!-- Hero:大留白 + 大字,不居中,左对齐更有设计感 -->
+    <section class="pt-32 pb-40">
+      <p class="mb-6 font-mono text-xs uppercase tracking-widest text-dim">
+        v0.1.0 — 开源 · MIT
+      </p>
+      <h1 class="text-5xl font-semibold leading-[1.05] tracking-tighter2 text-ink sm:text-7xl">
+        AI 写代码,<br />
+        <span class="text-dim">人类拍板。</span>
+      </h1>
+      <p class="mt-8 max-w-xl text-lg leading-relaxed text-dim">
+        内置 AI 编程 Agent,直连 LLM API。可选 team 模式:多 AI 并行开发,worktree 隔离,
+        人类审查后合并。AI 永不 merge —— 这是代码层的保证,不是 prompt 层的请求。
+      </p>
+
+      <!-- 安装命令:极简一行,不套框 -->
+      <div class="mt-12 flex items-center gap-4">
+        <code class="font-mono text-sm text-ink">
+          <span class="text-dim">$</span> {INSTALL_CMD}
+        </code>
+        <button
+          id="copy-btn"
+          class="font-mono text-xs text-dim transition hover:text-accent"
+          onclick="copyInstall()"
+        >
+          <span id="copy-label">复制</span>
+        </button>
+      </div>
+
+      <div class="mt-8 flex items-center gap-6 text-sm">
+        <a href={GITHUB_URL} class="text-ink underline decoration-accent decoration-2 underline-offset-4 transition hover:decoration-4">
+          查看源码
+        </a>
+        <span class="text-line">/</span>
+        <a href={DOCS_URL} class="text-dim transition hover:text-ink">
+          阅读文档
+        </a>
+      </div>
+    </section>
+
+    <!-- 分割线 -->
+    <hr class="border-line" />
+
+    <!-- 特性:不用卡片网格,用纵向编号列表,更像编辑设计 -->
+    <section id="features" class="py-32">
+      <div class="space-y-24">
+        <div class="grid gap-8 sm:grid-cols-[auto_1fr] sm:gap-16">
+          <span class="font-mono text-sm text-dim">01</span>
+          <div>
+            <h2 class="text-2xl font-semibold tracking-tightish text-ink">内置 Agent,不依赖外部 CLI</h2>
+            <p class="mt-4 max-w-lg leading-relaxed text-dim">
+              直接调 Anthropic / OpenAI 兼容 API,自己执行工具(读写、搜索、运行命令)、流式输出、
+              跨会话记忆。一个二进制,零运行时依赖。
+            </p>
+          </div>
+        </div>
+
+        <div class="grid gap-8 sm:grid-cols-[auto_1fr] sm:gap-16">
+          <span class="font-mono text-sm text-dim">02</span>
+          <div>
+            <h2 class="text-2xl font-semibold tracking-tightish text-ink">AI 永不 merge</h2>
+            <p class="mt-4 max-w-lg leading-relaxed text-dim">
+              合并路径只存在于人类命令侧。Agent 的工具表里没有 merge、没有 push ——
+              这不是提示词的约束,是代码结构的切断。
+            </p>
+          </div>
+        </div>
+
+        <div class="grid gap-8 sm:grid-cols-[auto_1fr] sm:gap-16">
+          <span class="font-mono text-sm text-dim">03</span>
+          <div>
+            <h2 class="text-2xl font-semibold tracking-tightish text-ink">Worktree 隔离,git-native 协作</h2>
+            <p class="mt-4 max-w-lg leading-relaxed text-dim">
+              每个 task 一个独立 worktree + 分支,多 AI 并行无冲突。团队状态走 git push/pull 同步,
+              不需要额外服务器。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <hr class="border-line" />
+
+    <!-- 双模式:左右对照,细线分隔 -->
+    <section class="py-32">
+      <div class="grid gap-px overflow-hidden rounded-none bg-line sm:grid-cols-2">
+        <div class="bg-bg p-10">
+          <p class="font-mono text-xs uppercase tracking-widest text-dim">Solo · 默认</p>
+          <h3 class="mt-4 text-3xl font-semibold tracking-tightish text-ink">1 人 + 1 AI</h3>
+          <p class="mt-4 leading-relaxed text-dim">
+            开箱即用。开终端、启动会话、让 AI 写代码、你审查提交。三步上手。
+          </p>
+          <div class="mt-6 font-mono text-sm text-accent">
+            init · run · config · push
+          </div>
+        </div>
+        <div class="bg-bg p-10">
+          <p class="font-mono text-xs uppercase tracking-widest text-dim">Team · <span class="text-ink">team init</span> 升级</p>
+          <h3 class="mt-4 text-3xl font-semibold tracking-tightish text-ink">N 人 × N AI</h3>
+          <p class="mt-4 leading-relaxed text-dim">
+            每个人指挥自己的 AI 并行开发,proposal 审查流程合并。AI 永远不能自己合并。
+          </p>
+          <div class="mt-6 font-mono text-sm text-accent">
+            task · review · approve · sync
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 快速上手:终端,但极简——只有框和文字 -->
+    <section id="start" class="py-32">
+      <h2 class="text-2xl font-semibold tracking-tightish text-ink">三步开始</h2>
+      <p class="mt-3 text-dim">假设你已在一个 git 仓库里。</p>
+
+      <div class="mt-12 border border-line bg-surface">
+        <!-- 终端标题栏:只有三个点,无圆角 -->
+        <div class="flex items-center gap-2 border-b border-line px-4 py-2.5">
+          <span class="h-2.5 w-2.5 rounded-full bg-line"></span>
+          <span class="h-2.5 w-2.5 rounded-full bg-line"></span>
+          <span class="h-2.5 w-2.5 rounded-full bg-line"></span>
+        </div>
+        <pre class="overflow-x-auto p-6 font-mono text-sm leading-7"><code><span class="text-dim">$</span> <span class="text-ink">cd your-project</span>
+<span class="text-dim">$</span> <span class="text-ink">boltcode init</span>
+<span class="text-dim">  ✓ boltcode initialized</span>
+<span class="text-dim">$</span> <span class="text-ink">boltcode</span>
+<span class="text-dim">  ╭── BOLTCODE v0.1.0 ──╮</span>
+<span class="text-dim">  ╰── type 'help' ──────╯</span>
+<span class="text-ink">boltcode</span><span class="text-dim">&gt;</span> <span class="text-ink">run 给登录模块加上 argon2 哈希</span>
+<span class="text-dim">  ✏  Edit  internal/auth/password.go</span>
+<span class="text-dim">  ⚙  Run   go build ./...</span>
+<span class="text-accent">  ✓ 构建通过</span>
+<span class="text-ink">boltcode</span><span class="text-dim">&gt;</span> <span class="text-accent">/diff</span>
+<span class="text-dim">  + argon2 hashed passwords</span></code></pre>
+      </div>
+
+      <!-- 斜杠命令:扁平列表,不套卡片 -->
+      <div class="mt-12 grid gap-x-12 gap-y-2 sm:grid-cols-2">
+        <div class="flex items-baseline gap-3 font-mono text-sm">
+          <span class="text-accent">/model</span><span class="text-dim">切换模型</span>
+        </div>
+        <div class="flex items-baseline gap-3 font-mono text-sm">
+          <span class="text-accent">/profile</span><span class="text-dim">切换 provider</span>
+        </div>
+        <div class="flex items-baseline gap-3 font-mono text-sm">
+          <span class="text-accent">/diff</span><span class="text-dim">查看改动</span>
+        </div>
+        <div class="flex items-baseline gap-3 font-mono text-sm">
+          <span class="text-accent">/triage</span><span class="text-dim">审查代码库</span>
+        </div>
+        <div class="flex items-baseline gap-3 font-mono text-sm">
+          <span class="text-accent">/compact</span><span class="text-dim">压缩上下文</span>
+        </div>
+        <div class="flex items-baseline gap-3 font-mono text-sm">
+          <span class="text-accent">/sessions</span><span class="text-dim">恢复会话</span>
+        </div>
+      </div>
+    </section>
+
+    <hr class="border-line" />
+
+    <!-- 国产模型:简短,一个代码块说明 -->
+    <section class="py-32">
+      <h2 class="text-2xl font-semibold tracking-tightish text-ink">为中文开发者而调</h2>
+      <p class="mt-4 max-w-lg leading-relaxed text-dim">
+        支持火山方舟、智谱、通义等 OpenAI 兼容网关。多 profile 并存,
+        <code class="font-mono text-accent">/profile</code> 一键切换。Gitee 原生支持。
+      </p>
+
+      <div class="mt-10 border border-line bg-surface">
+        <div class="border-b border-line px-4 py-2 font-mono text-xs text-dim">
+          ~/.boltcode/agent.json
+        </div>
+        <pre class="overflow-x-auto p-6 font-mono text-sm leading-7"><code><span class="text-dim">{</span>
+  <span class="text-ink">"profiles"</span>: <span class="text-dim">[</span>
+    <span class="text-dim">{</span> <span class="text-ink">"name"</span>: <span class="text-accent">"anthropic"</span><span class="text-dim">,</span> <span class="text-ink">"model"</span>: <span class="text-accent">"claude-sonnet-4"</span> <span class="text-dim">},</span>
+    <span class="text-dim">{</span> <span class="text-ink">"name"</span>: <span class="text-accent">"火山方舟"</span><span class="text-dim">,</span>
+      <span class="text-ink">"base_url"</span>: <span class="text-accent">"https://ark.cn-beijing.volces.com/api/v3"</span><span class="text-dim">,</span>
+      <span class="text-ink">"model"</span>: <span class="text-accent">"doubao-pro"</span> <span class="text-dim">}</span>
+  <span class="text-dim">],</span>
+  <span class="text-ink">"current"</span>: <span class="text-accent">"火山方舟"</span>
+<span class="text-dim">}</span></code></pre>
+      </div>
+    </section>
+
+    <!-- CTA:极简收尾 -->
+    <section class="py-32 text-center">
+      <p class="font-mono text-sm text-dim">$</p>
+      <p class="mt-4 font-mono text-lg text-ink">{INSTALL_CMD}</p>
+      <a
+        href={GITHUB_URL}
+        class="mt-10 inline-block border-b border-ink pb-0.5 text-sm text-ink transition hover:border-accent hover:text-accent"
+      >
+        Star on GitHub ↗
+      </a>
+    </section>
+
+    <!-- Footer:一行,无装饰 -->
+    <footer class="flex items-center justify-between border-t border-line py-8 text-xs text-dim">
+      <span class="font-mono">BoltCode · MIT</span>
+      <span class="font-mono">Built by Stringadmin</span>
+    </footer>
+
+  </main>
+
+  <script is:inline>
+    function copyInstall() {
+      const cmd = 'curl -fsSL https://stringtest.top/install.sh | sh';
+      navigator.clipboard.writeText(cmd).then(() => {
+        const label = document.getElementById('copy-label');
+        if (label) {
+          label.textContent = '已复制';
+          setTimeout(() => label.textContent = '复制', 2000);
+        }
+      });
+    }
+  </script>
+</Layout>

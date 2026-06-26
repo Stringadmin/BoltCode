@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BoltCode Logo 画板</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #1a1b26;
+    color: #c0caf5;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 18px;
+    margin-bottom: 12px;
+    color: #7aa2f7;
+  }
+  .hint {
+    font-size: 12px;
+    color: #565f89;
+    margin-bottom: 16px;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 12px;
+    padding: 10px;
+    background: #24283b;
+    border-radius: 8px;
+  }
+  .toolbar label {
+    font-size: 12px;
+    color: #9aa5ce;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .toolbar input[type=color] {
+    width: 36px;
+    height: 30px;
+    border: none;
+    background: none;
+    cursor: pointer;
+  }
+  .toolbar input[type=range] {
+    width: 90px;
+  }
+  .swatches {
+    display: flex;
+    gap: 4px;
+  }
+  .swatch {
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 2px solid transparent;
+  }
+  .swatch.active { border-color: #fff; }
+  .btn {
+    padding: 6px 12px;
+    border: none;
+    border-radius: 6px;
+    background: #3b4261;
+    color: #c0caf5;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .btn:hover { background: #4c5375; }
+  .btn.primary { background: #7aa2f7; color: #1a1b26; font-weight: 600; }
+  .btn.danger { background: #f7768e; color: #1a1b26; }
+  .canvas-wrap {
+    background: #fff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    display: inline-block;
+  }
+  canvas {
+    display: block;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .tools-right {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+  }
+</style>
+</head>
+<body>
+  <h1>🎨 BoltCode Logo 画板</h1>
+  <div class="hint">鼠标/触屏绘制 · 画完点"导出 PNG"保存。建议在透明或白底上画，便于后续转成 logo。</div>
+
+  <div class="toolbar">
+    <label>颜色 <input type="color" id="color" value="#7aa2f7"></label>
+    <div class="swatches" id="swatches"></div>
+    <label>笔刷 <input type="range" id="size" min="1" max="60" value="8"></label>
+    <span id="sizeVal" style="font-size:12px;color:#9aa5ce;width:30px">8</span>
+    <button class="btn" id="eraser">橡皮</button>
+    <button class="btn" id="undo">撤销</button>
+    <div class="tools-right">
+      <label>背景
+        <select id="bg">
+          <option value="white">白底</option>
+          <option value="transparent">透明</option>
+          <option value="dark">深色</option>
+        </select>
+      </label>
+      <button class="btn danger" id="clear">清空</button>
+      <button class="btn primary" id="exportPng">导出 PNG</button>
+    </div>
+  </div>
+
+  <div class="canvas-wrap">
+    <canvas id="canvas" width="800" height="500"></canvas>
+  </div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const colorInput = document.getElementById('color');
+const sizeInput = document.getElementById('size');
+const sizeVal = document.getElementById('sizeVal');
+const eraserBtn = document.getElementById('eraser');
+const undoBtn = document.getElementById('undo');
+const clearBtn = document.getElementById('clear');
+const exportPng = document.getElementById('exportPng');
+const bgSelect = document.getElementById('bg');
+
+let drawing = false;
+let eraser = false;
+let last = null;
+let history = [];
+
+const palette = ['#7aa2f7','#f7768e','#e0af68','#9ece6a','#bb9af7','#7dcfff','#1a1b26','#ffffff'];
+const sw = document.getElementById('swatches');
+palette.forEach((c, i) => {
+  const s = document.createElement('div');
+  s.className = 'swatch' + (i === 0 ? ' active' : '');
+  s.style.background = c;
+  s.onclick = () => {
+    colorInput.value = c;
+    document.querySelectorAll('.swatch').forEach(x => x.classList.remove('active'));
+    s.classList.add('active');
+    eraser = false;
+    eraserBtn.classList.remove('primary');
+  };
+  sw.appendChild(s);
+});
+
+function fillBg() {
+  const v = bgSelect.value;
+  if (v === 'white') { ctx.fillStyle = '#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); }
+  else if (v === 'dark') { ctx.fillStyle = '#1a1b26'; ctx.fillRect(0,0,canvas.width,canvas.height); }
+  // transparent: do nothing (canvas is already clear)
+}
+fillBg();
+saveHistory();
+
+function saveHistory() {
+  if (history.length > 30) history.shift();
+  history.push(ctx.getImageData(0,0,canvas.width,canvas.height));
+}
+
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: (t.clientX - r.left) * (canvas.width / r.width),
+           y: (t.clientY - r.top) * (canvas.height / r.height) };
+}
+
+function start(e) {
+  e.preventDefault();
+  drawing = true;
+  last = pos(e);
+  saveHistory();
+  draw(e); // dot on click
+}
+function draw(e) {
+  if (!drawing) return;
+  e.preventDefault();
+  const p = pos(e);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = sizeInput.value;
+  if (eraser) {
+    ctx.globalCompositeOperation = bgSelect.value === 'transparent' ? 'destination-out' : 'source-over';
+    ctx.strokeStyle = bgSelect.value === 'white' ? '#fff' : bgSelect.value === 'dark' ? '#1a1b26' : 'rgba(0,0,0,1)';
+  } else {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = colorInput.value;
+  }
+  ctx.beginPath();
+  ctx.moveTo(last.x, last.y);
+  ctx.lineTo(p.x, p.y);
+  ctx.stroke();
+  last = p;
+}
+function stop() { drawing = false; }
+
+canvas.addEventListener('mousedown', start);
+canvas.addEventListener('mousemove', draw);
+window.addEventListener('mouseup', stop);
+canvas.addEventListener('touchstart', start);
+canvas.addEventListener('touchmove', draw);
+canvas.addEventListener('touchend', stop);
+
+sizeInput.oninput = () => sizeVal.textContent = sizeInput.value;
+
+eraserBtn.onclick = () => {
+  eraser = !eraser;
+  eraserBtn.classList.toggle('primary', eraser);
+};
+
+undoBtn.onclick = () => {
+  if (history.length > 1) {
+    history.pop();
+    ctx.putImageData(history[history.length-1], 0, 0);
+  }
+};
+
+clearBtn.onclick = () => {
+  saveHistory();
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  fillBg();
+};
+
+bgSelect.onchange = () => {
+  // Composite current drawing onto new bg: snapshot, clear, refill, redraw
+  const img = ctx.getImageData(0,0,canvas.width,canvas.height);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  fillBg();
+  ctx.putImageData(img, 0, 0);
+};
+
+exportPng.onclick = () => {
+  const link = document.createElement('a');
+  link.download = 'boltcode-logo.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+};
+</script>
+</body>
+</html>

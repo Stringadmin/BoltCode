@@ -1,0 +1,396 @@
+package agent
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// sleepFn pauses for backoff between retries. It's a package variable so tests
+// can swap in a no-op to avoid real waits; production code uses time.Sleep.
+var sleepFn = time.Sleep
+
+// callAPI sends the current conversation to the API and streams the response.
+// Text content is printed to stdout in real-time as it arrives; tool_use blocks
+// are accumulated and returned as JSON so the agent loop can execute them.
+//
+// Transient failures (network errors, 429 rate limits, 5xx server errors) are
+// retried with exponential backoff so a flaky connection or a momentary rate
+// limit doesn't kill the whole session. Non-retryable failures (4xx auth /
+// request errors) surface immediately.
+func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
+	url := buildURL(a.Config.BaseURL)
+	model := a.Config.Model
+	if model == "" {
+		model = "claude-sonnet-4-20250514"
+	}
+
+	body := map[string]interface{}{
+		"model":      model,
+		"max_tokens": 8192,
+		"system":     system,
+		"messages":   a.Messages,
+		"tools":      Tools,
+		"stream":     true,
+	}
+	payload, _ := json.Marshal(body)
+
+	const maxAttempts = 4
+	var backoff time.Duration = 1 * time.Second
+	client := &http.Client{Timeout: 5 * time.Minute}
+
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Rebuild the request each attempt: the request body reader is
+		// consumed by client.Do, so it can't be reused across calls.
+		content, usage, err, retryable, wait := a.doOnce(client, url, payload)
+
+		if err == nil {
+			return content, usage, nil
+		}
+		if !retryable {
+			// Non-retryable failure (4xx auth/bad request) — surface now.
+			return nil, Usage{}, err
+		}
+
+		lastErr = err
+		if attempt == maxAttempts-1 {
+			break
+		}
+		if wait <= 0 {
+			wait = backoff
+			backoff *= 2
+			if backoff > 8*time.Second {
+				backoff = 8 * time.Second
+			}
+		}
+		fmt.Fprintf(stderr(), "  api: %v — retrying in %s\n", lastErr, wait)
+		sleepFn(wait)
+	}
+
+	return nil, Usage{}, fmt.Errorf("API error after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// doOnce performs a single API request. It returns (content, usage, err,
+// retryable, wait):
+//   - on success: (content, usage, nil, false, 0)
+//   - on a transient failure: (nil, usage, err, true, wait) where wait is the
+//     server-suggested delay (e.g. from Retry-After) or 0 to let the caller
+//     apply its own backoff
+//   - on a non-retryable failure: (nil, usage, err, false, 0)
+func (a *Agent) doOnce(client *http.Client, url string, payload []byte) ([]byte, Usage, error, bool, time.Duration) {
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		// Malformed request is deterministic — no point retrying.
+		return nil, Usage{}, err, false, 0
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if a.Config.BaseURL == "" || strings.Contains(url, "anthropic.com") {
+		req.Header.Set("x-api-key", a.Config.APIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	} else {
+		req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// Connection failure / timeout — transient.
+		return nil, Usage{}, fmt.Errorf("connection failed: %w", err), true, 0
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		content, usage, perr := a.parseStream(resp.Body)
+		if perr != nil {
+			// A mid-stream failure (dropped connection, oversized line) is
+			// worth retrying — the next attempt may complete cleanly.
+			return nil, usage, perr, true, 0
+		}
+		return content, usage, nil, false, 0
+	}
+
+	// Non-200: read the body for a diagnostic message.
+	var errBody bytes.Buffer
+	errBody.ReadFrom(resp.Body)
+	msg := fmt.Sprintf("API %d: %s", resp.StatusCode, truncateBytes(errBody.Bytes(), 200))
+
+	switch {
+	case resp.StatusCode == 429:
+		// Rate limited — honor the server's Retry-After if present.
+		return nil, Usage{}, fmt.Errorf("%s (rate limited)", msg), true, parseRetryAfter(resp.Header.Get("Retry-After"))
+	case resp.StatusCode >= 500:
+		return nil, Usage{}, fmt.Errorf("%s (server error)", msg), true, 0
+	default:
+		// 4xx (auth, bad request, etc.) is deterministic — don't retry.
+		return nil, Usage{}, fmt.Errorf("%s", msg), false, 0
+	}
+}
+
+// parseRetryAfter interprets an HTTP Retry-After header as a delay. Accepts
+// either an integer number of seconds or an HTTP-date; returns 0 if it can't
+// be parsed (letting the caller fall back to its own backoff).
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	// Integer seconds.
+	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	// HTTP-date form.
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// stderrWriter is the sink for retry-progress notices. It's a package variable
+// so tests can redirect it to io.Discard; production code writes to os.Stderr.
+var stderrWriter io.Writer = os.Stderr
+
+// stderr returns the current progress sink.
+func stderr() io.Writer {
+	if stderrWriter == nil {
+		return io.Discard
+	}
+	return stderrWriter
+}
+
+// streamBlock tracks a content block being assembled from SSE deltas.
+type streamBlock struct {
+	Type  string // "text" or "tool_use"
+	ID    string // tool_use id
+	Name  string // tool_use name
+	Text  string // accumulated text
+	Input string // accumulated JSON input for tool_use
+}
+
+// parseStream reads SSE events from the Anthropic streaming API, prints text
+// in real-time, and returns assembled content blocks + usage when done.
+func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte, Usage, error) {
+	scanner := bufio.NewScanner(body)
+	// A single SSE data line can carry a large text delta or a big tool input
+	// JSON blob. The default 64KB token limit would silently truncate such
+	// lines (and bufio.Scanner drops the rest without erroring here), corrupting
+	// the response. Raise it to 4MB.
+	scanner.Buffer(make([]byte, 0, 1<<20), 4<<20)
+	var blocks []streamBlock
+	var currentIdx int
+	var usage Usage
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := line[6:]
+		if data == "[DONE]" {
+			break
+		}
+
+		var event struct {
+			Type  string `json:"type"`
+			Index int    `json:"index"`
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+				JSON string `json:"partial_json"`
+			} `json:"delta"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"content_block"`
+			Usage *Usage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+
+		switch event.Type {
+		case "content_block_start":
+			block := streamBlock{Type: event.ContentBlock.Type}
+			if event.ContentBlock.Type == "tool_use" {
+				block.ID = event.ContentBlock.ID
+				block.Name = event.ContentBlock.Name
+			}
+			blocks = append(blocks, block)
+			currentIdx = event.Index
+
+		case "content_block_delta":
+			if event.Index >= len(blocks) {
+				continue
+			}
+			currentIdx = event.Index
+			switch event.Delta.Type {
+			case "text_delta":
+				blocks[currentIdx].Text += event.Delta.Text
+			case "input_json_delta":
+				blocks[currentIdx].Input += event.Delta.JSON
+			}
+
+		case "content_block_stop":
+			// When a text block finishes, render it as markdown rather than
+			// having streamed raw text — this gives the assistant's reply
+			// structure (headers, lists, code blocks) and a role label, instead
+			// of an undecorated wall of text.
+			if currentIdx < len(blocks) && blocks[currentIdx].Type == "text" && strings.TrimSpace(blocks[currentIdx].Text) != "" {
+				printAssistantMessage(blocks[currentIdx].Text)
+			}
+
+		case "message_delta":
+			if event.Usage != nil {
+				usage = *event.Usage
+			}
+			// Also check for usage in delta
+			var deltaMsg struct {
+				Usage Usage `json:"usage"`
+			}
+			json.Unmarshal([]byte(data), &deltaMsg)
+			if deltaMsg.Usage.OutputTokens > 0 {
+				usage.OutputTokens = deltaMsg.Usage.OutputTokens
+			}
+
+		case "message_start":
+			var startMsg struct {
+				Message struct {
+					Usage Usage `json:"usage"`
+				} `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(data), &startMsg); err == nil {
+				usage.InputTokens = startMsg.Message.Usage.InputTokens
+			}
+
+		case "error":
+			var errEvt struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal([]byte(data), &errEvt) == nil {
+				return nil, Usage{}, fmt.Errorf("stream error: %s", errEvt.Error.Message)
+			}
+		}
+	}
+
+	// Scanner exits the loop on read error too (e.g. a line exceeding the
+	// buffer cap, or a dropped connection). Surface it instead of treating a
+	// truncated stream as complete.
+	if err := scanner.Err(); err != nil {
+		return nil, usage, fmt.Errorf("stream read error: %w", err)
+	}
+
+	// Assemble content blocks in the same format as non-streaming response
+	var content []map[string]interface{}
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			content = append(content, map[string]interface{}{
+				"type": "text",
+				"text": b.Text,
+			})
+		case "tool_use":
+			var input interface{}
+			json.Unmarshal([]byte(b.Input), &input)
+			content = append(content, map[string]interface{}{
+				"type":  "tool_use",
+				"id":    b.ID,
+				"name":  b.Name,
+				"input": input,
+			})
+		}
+	}
+
+	result, _ := json.Marshal(content)
+	return result, usage, nil
+}
+
+// buildURL constructs the full API endpoint from a base URL.
+func buildURL(baseURL string) string {
+	if baseURL == "" {
+		return defaultAnthropicURL
+	}
+	if strings.HasSuffix(baseURL, "/messages") {
+		return baseURL
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(baseURL, "/v1") {
+		return baseURL + "/messages"
+	}
+	return baseURL + "/v1/messages"
+}
+
+func truncateBytes(b []byte, max int) string {
+	s := string(b)
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "..."
+	}
+	return s
+}
+
+// callAPINonStreaming makes a single non-streaming API call (no SSE, no tools)
+// and returns the raw content-blocks JSON. Used by context compaction, where we
+// want a quiet one-shot summary without streaming to the console.
+func (a *Agent) callAPINonStreaming() ([]byte, error) {
+	url := buildURL(a.Config.BaseURL)
+	model := a.Config.Model
+	if model == "" {
+		model = "claude-sonnet-4-20250514"
+	}
+	body := map[string]interface{}{
+		"model":       model,
+		"max_tokens":  1024,
+		"system":      "You are a helpful assistant that summarizes conversation history concisely.",
+		"messages":    a.Messages,
+		"stream":      false,
+	}
+	payload, _ := json.Marshal(body)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if a.Config.BaseURL == "" || strings.Contains(url, "anthropic.com") {
+		req.Header.Set("x-api-key", a.Config.APIKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	} else {
+		req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		var errBody bytes.Buffer
+		errBody.ReadFrom(resp.Body)
+		return nil, fmt.Errorf("API %d: %s", resp.StatusCode, truncateBytes(errBody.Bytes(), 200))
+	}
+
+	var result struct {
+		Content []map[string]interface{} `json:"content"`
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parse non-stream response: %w", err)
+	}
+	return json.Marshal(result.Content)
+}

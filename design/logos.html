@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>BoltCode Logo 候选方案</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #0f1117;
+    color: #c0caf5;
+    padding: 30px;
+  }
+  h1 { color: #7aa2f7; margin-bottom: 6px; }
+  .sub { color: #565f89; font-size: 13px; margin-bottom: 30px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 24px;
+    max-width: 900px;
+  }
+  .card {
+    background: #1a1b26;
+    border-radius: 12px;
+    padding: 24px;
+    border: 1px solid #2a2e44;
+  }
+  .card h3 { color: #e0af68; margin-bottom: 4px; font-size: 15px; }
+  .card .desc { color: #9aa5ce; font-size: 12px; margin-bottom: 16px; line-height: 1.5; }
+  .logo-box {
+    background: #fff;
+    border-radius: 8px;
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 140px;
+  }
+  .logo-box.dark { background: #0d1117; }
+  .actions { margin-top: 12px; display: flex; gap: 8px; }
+  .btn {
+    padding: 5px 11px; font-size: 11px; cursor: pointer;
+    border: none; border-radius: 5px; background: #3b4261; color: #c0caf5;
+  }
+  .btn:hover { background: #4c5375; }
+  .label-tag { display:inline-block; font-size:11px; color:#565f89; margin-top:6px; }
+</style>
+</head>
+<body>
+  <h1>BoltCode Logo 候选方案</h1>
+  <div class="sub">4 款设计，点"导出 SVG"下载矢量文件。挑一个喜欢的，我再据此调整终端 ASCII banner。</div>
+
+  <div class="grid">
+
+    <!-- 方案 A: 闪电螺栓 + 代码括号 -->
+    <div class="card">
+      <h3>A. 闪电代码 ⚡</h3>
+      <div class="desc">闪电（bolt）形主体 + 代码括号 { }，呼应 "Bolt"+"Code"。蓝紫渐变。</div>
+      <div class="logo-box">
+        <svg width="120" height="100" viewBox="0 0 120 100" id="logoA">
+          <defs>
+            <linearGradient id="gA" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#7aa2f7"/>
+              <stop offset="1" stop-color="#bb9af7"/>
+            </linearGradient>
+          </defs>
+          <path d="M70 5 L30 55 L55 55 L45 95 L90 40 L62 40 Z" fill="url(#gA)"/>
+          <text x="5" y="95" font-family="monospace" font-size="60" font-weight="bold" fill="#7aa2f7">{</text>
+          <text x="95" y="95" font-family="monospace" font-size="60" font-weight="bold" fill="#bb9af7">}</text>
+        </svg>
+      </div>
+      <div class="actions">
+        <button class="btn" onclick="exportSvg('logoA','boltcode-A')">导出 SVG</button>
+      </div>
+    </div>
+
+    <!-- 方案 B: 六边形 + B -->
+    <div class="card">
+      <h3>B. 六边胶囊 ⬡</h3>
+      <div class="desc">六边形（技术/蜂巢协作感）内嵌 B，纯色简洁，适合做 App 图标。</div>
+      <div class="logo-box">
+        <svg width="110" height="110" viewBox="0 0 110 110" id="logoB">
+          <defs>
+            <linearGradient id="gB" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#7dcfff"/>
+              <stop offset="1" stop-color="#7aa2f7"/>
+            </linearGradient>
+          </defs>
+          <path d="M55 5 L100 30 L100 80 L55 105 L10 80 L10 30 Z" fill="url(#gB)"/>
+          <text x="55" y="75" text-anchor="middle" font-family="Segoe UI,sans-serif" font-size="55" font-weight="bold" fill="#fff">B</text>
+        </svg>
+      </div>
+      <div class="actions">
+        <button class="btn" onclick="exportSvg('logoB','boltcode-B')">导出 SVG</button>
+      </div>
+    </div>
+
+    <!-- 方案 C: 终端窗口 + 闪电 -->
+    <div class="card">
+      <h3>C. 终端闪电 ▶</h3>
+      <div class="desc">终端窗口框 + 内嵌闪电 + 提示符 >，强调 CLI 工具属性。深底适配。</div>
+      <div class="logo-box dark">
+        <svg width="130" height="100" viewBox="0 0 130 100" id="logoC">
+          <rect x="5" y="15" width="120" height="80" rx="8" fill="#1a1b26" stroke="#7aa2f7" stroke-width="3"/>
+          <circle cx="18" cy="28" r="3" fill="#f7768e"/>
+          <circle cx="30" cy="28" r="3" fill="#e0af68"/>
+          <circle cx="42" cy="28" r="3" fill="#9ece6a"/>
+          <path d="M30 55 L22 65 L30 75" stroke="#9ece6a" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M75 45 L55 70 L68 70 L60 90 L85 60 L70 60 Z" fill="#7aa2f7"/>
+        </svg>
+      </div>
+      <div class="actions">
+        <button class="btn" onclick="exportSvg('logoC','boltcode-C')">导出 SVG</button>
+      </div>
+    </div>
+
+    <!-- 方案 D: 字母组合 BC -->
+    <div class="card">
+      <h3>D. 字母组合 BC</h3>
+      <div class="desc">B+C 交织成方块，右下角闪电点睛，极简品牌感，缩放到小尺寸仍清晰。</div>
+      <div class="logo-box">
+        <svg width="120" height="100" viewBox="0 0 120 100" id="logoD">
+          <defs>
+            <linearGradient id="gD" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#bb9af7"/>
+              <stop offset="1" stop-color="#7aa2f7"/>
+            </linearGradient>
+          </defs>
+          <rect x="10" y="10" width="100" height="80" rx="16" fill="url(#gD)"/>
+          <text x="32" y="68" font-family="Segoe UI,sans-serif" font-size="54" font-weight="bold" fill="#fff">B</text>
+          <path d="M85 30 L72 55 L82 55 L76 78 L95 50 L84 50 Z" fill="#e0af68"/>
+        </svg>
+      </div>
+      <div class="actions">
+        <button class="btn" onclick="exportSvg('logoD','boltcode-D')">导出 SVG</button>
+      </div>
+    </div>
+
+  </div>
+
+<script>
+function exportSvg(id, name) {
+  const svg = document.getElementById(id);
+  const clone = svg.cloneNode(true);
+  clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+  const data = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([data], {type:'image/svg+xml'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name + '.svg'; a.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>

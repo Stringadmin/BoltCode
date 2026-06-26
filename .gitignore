@@ -1,0 +1,25 @@
+# Compiled binaries
+boltcode
+boltcode.exe
+*.exe
+*.out
+
+# Go build/test artifacts
+*.test
+*.prof
+
+# BoltCode local state (worktrees are per-machine, never tracked)
+.boltcode/local/
+
+# Local editor/agent state
+.claude/
+
+# 开发内部记录，不公开
+conversation-log.md
+
+# 构建产物，release 走 GitHub Releases
+dist/
+
+# OS noise
+.DS_Store
+Thumbs.db

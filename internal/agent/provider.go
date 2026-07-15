@@ -7,7 +7,10 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync/atomic"
 )
+
+var fallbackToolCallSeq uint64
 
 // isAnthropicProvider returns true if the config points to an Anthropic-native
 // API. Provider "anthropic" (or empty, the default) uses the Anthropic
@@ -111,6 +114,7 @@ func buildOpenAIPayload(cfg Config, system string, messages []Message) []byte {
 //   - User tool_result blocks become separate "tool" role messages
 func convertMessagesToOpenAI(system string, messages []Message) []map[string]interface{} {
 	var out []map[string]interface{}
+	var pendingToolIDs []string
 	out = append(out, map[string]interface{}{
 		"role":    "system",
 		"content": system,
@@ -118,36 +122,40 @@ func convertMessagesToOpenAI(system string, messages []Message) []map[string]int
 	for _, msg := range messages {
 		switch msg.Role {
 		case "user":
-			switch content := msg.Content.(type) {
-			case string:
+			if content, ok := msg.Content.(string); ok {
 				out = append(out, map[string]interface{}{
 					"role":    "user",
 					"content": content,
 				})
-			case []interface{}:
+			} else {
+				blocks := messageContentBlocks(msg.Content)
 				hasToolResult := false
-				for _, block := range content {
-					if m, ok := block.(map[string]interface{}); ok {
-						if t, _ := m["type"].(string); t == "tool_result" {
-							hasToolResult = true
-							toolUseID, _ := m["tool_use_id"].(string)
-							contentStr, _ := m["content"].(string)
-							out = append(out, map[string]interface{}{
-								"role":         "tool",
-								"tool_call_id": toolUseID,
-								"content":      contentStr,
-							})
+				resultIndex := 0
+				for _, block := range blocks {
+					if t, _ := block["type"].(string); t == "tool_result" {
+						hasToolResult = true
+						toolUseID, _ := block["tool_use_id"].(string)
+						if toolUseID == "" && resultIndex < len(pendingToolIDs) {
+							toolUseID = pendingToolIDs[resultIndex]
 						}
+						contentStr, _ := block["content"].(string)
+						out = append(out, map[string]interface{}{
+							"role":         "tool",
+							"tool_call_id": toolUseID,
+							"content":      contentStr,
+						})
+						resultIndex++
 					}
+				}
+				if hasToolResult {
+					pendingToolIDs = nil
 				}
 				if !hasToolResult {
 					var text string
-					for _, block := range content {
-						if m, ok := block.(map[string]interface{}); ok {
-							if t, _ := m["type"].(string); t == "text" {
-								if s, ok := m["text"].(string); ok {
-									text += s
-								}
+					for _, block := range blocks {
+						if t, _ := block["type"].(string); t == "text" {
+							if s, ok := block["text"].(string); ok {
+								text += s
 							}
 						}
 					}
@@ -162,30 +170,30 @@ func convertMessagesToOpenAI(system string, messages []Message) []map[string]int
 		case "assistant":
 			var textContent string
 			var toolCalls []map[string]interface{}
-			switch content := msg.Content.(type) {
-			case string:
+			if content, ok := msg.Content.(string); ok {
 				textContent = content
-			case []interface{}:
-				for _, block := range content {
-					if m, ok := block.(map[string]interface{}); ok {
-						switch t, _ := m["type"].(string); t {
-						case "text":
-							if s, ok := m["text"].(string); ok {
-								textContent += s
-							}
-						case "tool_use":
-							id, _ := m["id"].(string)
-							name, _ := m["name"].(string)
-							input, _ := json.Marshal(m["input"])
-							toolCalls = append(toolCalls, map[string]interface{}{
-								"id":   id,
-								"type": "function",
-								"function": map[string]interface{}{
-									"name":      name,
-									"arguments": string(input),
-								},
-							})
+			} else {
+				for _, block := range messageContentBlocks(msg.Content) {
+					switch t, _ := block["type"].(string); t {
+					case "text":
+						if s, ok := block["text"].(string); ok {
+							textContent += s
 						}
+					case "tool_use":
+						id, _ := block["id"].(string)
+						if id == "" {
+							id = nextFallbackToolCallID(len(toolCalls))
+						}
+						name, _ := block["name"].(string)
+						input, _ := json.Marshal(block["input"])
+						toolCalls = append(toolCalls, map[string]interface{}{
+							"id":   id,
+							"type": "function",
+							"function": map[string]interface{}{
+								"name":      name,
+								"arguments": string(input),
+							},
+						})
 					}
 				}
 			}
@@ -199,11 +207,40 @@ func convertMessagesToOpenAI(system string, messages []Message) []map[string]int
 			}
 			if len(toolCalls) > 0 {
 				m["tool_calls"] = toolCalls
+				pendingToolIDs = make([]string, 0, len(toolCalls))
+				for _, call := range toolCalls {
+					pendingToolIDs = append(pendingToolIDs, call["id"].(string))
+				}
 			}
 			out = append(out, m)
 		}
 	}
 	return out
+}
+
+func nextFallbackToolCallID(index int) string {
+	seq := atomic.AddUint64(&fallbackToolCallSeq, 1)
+	return fmt.Sprintf("call_boltcode_%d_%d", seq, index)
+}
+
+// messageContentBlocks accepts both shapes produced inside the process and
+// after JSON round-tripping. Tool results are built as []map in loop.go, while
+// loaded sessions decode the same JSON as []interface{}.
+func messageContentBlocks(content interface{}) []map[string]interface{} {
+	switch blocks := content.(type) {
+	case []map[string]interface{}:
+		return blocks
+	case []interface{}:
+		out := make([]map[string]interface{}, 0, len(blocks))
+		for _, block := range blocks {
+			if m, ok := block.(map[string]interface{}); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // convertToolsToOpenAI converts Anthropic tool definitions (name, description,
@@ -324,9 +361,17 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 
 	for _, idx := range indices {
 		tc := toolCalls[idx]
-		var input interface{}
+		if tc.ID == "" {
+			tc.ID = nextFallbackToolCallID(idx)
+		}
+		if tc.Name == "" {
+			return nil, usage, fmt.Errorf("tool call %d is missing a function name", idx)
+		}
+		var input interface{} = map[string]interface{}{}
 		if tc.Args != "" {
-			json.Unmarshal([]byte(tc.Args), &input)
+			if err := json.Unmarshal([]byte(tc.Args), &input); err != nil {
+				return nil, usage, fmt.Errorf("tool call %s has invalid arguments: %w", tc.Name, err)
+			}
 		}
 		content = append(content, map[string]interface{}{
 			"type":  "tool_use",

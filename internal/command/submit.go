@@ -14,7 +14,15 @@ import (
 //
 // The diff is computed from the merge-base of the task branch and its base, so
 // the proposal reflects only what this task changed even if base moved on.
+//
+// The proposal creation + task status transition (→ review) are wrapped in the
+// store-wide lock so two agents can't double-submit the same task and produce
+// two pending proposals for one piece of work.
 func (a *App) Submit(taskID, summary, rationale string) (*model.Proposal, error) {
+	if err := a.Store.Lock(); err != nil {
+		return nil, err
+	}
+	defer a.Store.Unlock()
 	t, err := a.Store.GetTask(taskID)
 	if err != nil {
 		return nil, fmt.Errorf("task %s: %w", taskID, err)

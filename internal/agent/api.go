@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,21 +27,15 @@ var sleepFn = time.Sleep
 // limit doesn't kill the whole session. Non-retryable failures (4xx auth /
 // request errors) surface immediately.
 func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
-	url := buildURL(a.Config.BaseURL)
-	model := a.Config.Model
-	if model == "" {
-		model = "claude-sonnet-4-20250514"
-	}
+	url := providerURL(a.Config)
+	payload := buildPayload(a.Config, system, a.Messages)
 
-	body := map[string]interface{}{
-		"model":      model,
-		"max_tokens": 8192,
-		"system":     system,
-		"messages":   a.Messages,
-		"tools":      Tools,
-		"stream":     true,
-	}
-	payload, _ := json.Marshal(body)
+	// Cancelable context so Ctrl+C can interrupt a long API call without
+	// killing the process. The cancel func is stored on the Agent so the
+	// signal handler in launchAgent can call it.
+	ctx, cancel := context.WithCancel(context.Background())
+	a.cancelFn = cancel
+	defer cancel()
 
 	const maxAttempts = 4
 	var backoff time.Duration = 1 * time.Second
@@ -50,10 +45,14 @@ func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Rebuild the request each attempt: the request body reader is
 		// consumed by client.Do, so it can't be reused across calls.
-		content, usage, err, retryable, wait := a.doOnce(client, url, payload)
+		content, usage, err, retryable, wait := a.doOnce(ctx, client, url, payload)
 
 		if err == nil {
 			return content, usage, nil
+		}
+		// User interrupt — don't retry, surface immediately.
+		if ctx.Err() != nil {
+			return nil, Usage{}, ctx.Err()
 		}
 		if !retryable {
 			// Non-retryable failure (4xx auth/bad request) — surface now.
@@ -85,16 +84,16 @@ func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
 //     server-suggested delay (e.g. from Retry-After) or 0 to let the caller
 //     apply its own backoff
 //   - on a non-retryable failure: (nil, usage, err, false, 0)
-func (a *Agent) doOnce(client *http.Client, url string, payload []byte) ([]byte, Usage, error, bool, time.Duration) {
-	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+func (a *Agent) doOnce(ctx context.Context, client *http.Client, url string, payload []byte) ([]byte, Usage, error, bool, time.Duration) {
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
 	if err != nil {
 		// Malformed request is deterministic — no point retrying.
 		return nil, Usage{}, err, false, 0
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if a.Config.BaseURL == "" || strings.Contains(url, "anthropic.com") {
+	if isAnthropicProvider(a.Config) {
 		req.Header.Set("x-api-key", a.Config.APIKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("anthropic-version", "2025-01-25")
 	} else {
 		req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
 	}
@@ -107,7 +106,14 @@ func (a *Agent) doOnce(client *http.Client, url string, payload []byte) ([]byte,
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 200 {
-		content, usage, perr := a.parseStream(resp.Body)
+		var content []byte
+		var usage Usage
+		var perr error
+		if isAnthropicProvider(a.Config) {
+			content, usage, perr = a.parseStream(resp.Body)
+		} else {
+			content, usage, perr = a.parseOpenAIStream(resp.Body)
+		}
 		if perr != nil {
 			// A mid-stream failure (dropped connection, oversized line) is
 			// worth retrying — the next attempt may complete cleanly.
@@ -119,7 +125,7 @@ func (a *Agent) doOnce(client *http.Client, url string, payload []byte) ([]byte,
 	// Non-200: read the body for a diagnostic message.
 	var errBody bytes.Buffer
 	errBody.ReadFrom(resp.Body)
-	msg := fmt.Sprintf("API %d: %s", resp.StatusCode, truncateBytes(errBody.Bytes(), 200))
+	msg := fmt.Sprintf("API %d: %s", resp.StatusCode, truncateStr(string(errBody.Bytes()), 200, "..."))
 
 	switch {
 	case resp.StatusCode == 429:
@@ -168,7 +174,7 @@ func stderr() io.Writer {
 
 // streamBlock tracks a content block being assembled from SSE deltas.
 type streamBlock struct {
-	Type  string // "text" or "tool_use"
+	Type  string // "text", "tool_use", or "thinking"
 	ID    string // tool_use id
 	Name  string // tool_use name
 	Text  string // accumulated text
@@ -203,9 +209,11 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 			Type  string `json:"type"`
 			Index int    `json:"index"`
 			Delta struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-				JSON string `json:"partial_json"`
+				Type      string `json:"type"`
+				Text      string `json:"text"`
+				Thinking  string `json:"thinking"`
+				Signature string `json:"signature"`
+				JSON      string `json:"partial_json"`
 			} `json:"delta"`
 			ContentBlock struct {
 				Type string `json:"type"`
@@ -236,18 +244,22 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 			switch event.Delta.Type {
 			case "text_delta":
 				blocks[currentIdx].Text += event.Delta.Text
+				// Stream text immediately for real-time feedback (typewriter effect).
+				fmt.Print(event.Delta.Text)
+			case "thinking_delta":
+				blocks[currentIdx].Text += event.Delta.Thinking
 			case "input_json_delta":
 				blocks[currentIdx].Input += event.Delta.JSON
 			}
 
 		case "content_block_stop":
-			// When a text block finishes, render it as markdown rather than
-			// having streamed raw text — this gives the assistant's reply
-			// structure (headers, lists, code blocks) and a role label, instead
-			// of an undecorated wall of text.
 			if currentIdx < len(blocks) && blocks[currentIdx].Type == "text" && strings.TrimSpace(blocks[currentIdx].Text) != "" {
-				printAssistantMessage(blocks[currentIdx].Text)
+				// Text was already streamed token-by-token above; just end the paragraph.
+				fmt.Println()
 			}
+
+		case "signature_delta":
+			// Extended thinking signature — not user-visible, just consumed.
 
 		case "message_delta":
 			if event.Usage != nil {
@@ -291,7 +303,9 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 		return nil, usage, fmt.Errorf("stream read error: %w", err)
 	}
 
-	// Assemble content blocks in the same format as non-streaming response
+	// Assemble content blocks in the same format as non-streaming response.
+	// Thinking blocks are the model's internal reasoning — they are NOT included
+	// in the conversation history (that would waste context on invisible text).
 	var content []map[string]interface{}
 	for _, b := range blocks {
 		switch b.Type {
@@ -309,6 +323,7 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 				"name":  b.Name,
 				"input": input,
 			})
+			// "thinking" blocks are skipped intentionally.
 		}
 	}
 
@@ -331,30 +346,24 @@ func buildURL(baseURL string) string {
 	return baseURL + "/v1/messages"
 }
 
-func truncateBytes(b []byte, max int) string {
-	s := string(b)
-	r := []rune(s)
-	if len(r) > max {
-		return string(r[:max]) + "..."
-	}
-	return s
-}
-
 // callAPINonStreaming makes a single non-streaming API call (no SSE, no tools)
 // and returns the raw content-blocks JSON. Used by context compaction, where we
 // want a quiet one-shot summary without streaming to the console.
 func (a *Agent) callAPINonStreaming() ([]byte, error) {
+	if !isAnthropicProvider(a.Config) {
+		return a.callOpenAINonStreaming()
+	}
 	url := buildURL(a.Config.BaseURL)
 	model := a.Config.Model
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = DefaultModel
 	}
 	body := map[string]interface{}{
-		"model":       model,
-		"max_tokens":  1024,
-		"system":      "You are a helpful assistant that summarizes conversation history concisely.",
-		"messages":    a.Messages,
-		"stream":      false,
+		"model":      model,
+		"max_tokens": 1024,
+		"system":     "You are a helpful assistant that summarizes conversation history concisely.",
+		"messages":   a.Messages,
+		"stream":     false,
 	}
 	payload, _ := json.Marshal(body)
 
@@ -363,12 +372,8 @@ func (a *Agent) callAPINonStreaming() ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if a.Config.BaseURL == "" || strings.Contains(url, "anthropic.com") {
-		req.Header.Set("x-api-key", a.Config.APIKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-	} else {
-		req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
-	}
+	req.Header.Set("x-api-key", a.Config.APIKey)
+	req.Header.Set("anthropic-version", "2025-01-25")
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
@@ -379,7 +384,7 @@ func (a *Agent) callAPINonStreaming() ([]byte, error) {
 	if resp.StatusCode != 200 {
 		var errBody bytes.Buffer
 		errBody.ReadFrom(resp.Body)
-		return nil, fmt.Errorf("API %d: %s", resp.StatusCode, truncateBytes(errBody.Bytes(), 200))
+		return nil, fmt.Errorf("API %d: %s", resp.StatusCode, truncateStr(string(errBody.Bytes()), 200, "..."))
 	}
 
 	var result struct {
@@ -393,4 +398,57 @@ func (a *Agent) callAPINonStreaming() ([]byte, error) {
 		return nil, fmt.Errorf("parse non-stream response: %w", err)
 	}
 	return json.Marshal(result.Content)
+}
+
+// callOpenAINonStreaming makes a non-streaming OpenAI API call for compaction.
+func (a *Agent) callOpenAINonStreaming() ([]byte, error) {
+	url := buildOpenAIURL(a.Config.BaseURL)
+	model := a.Config.Model
+	if model == "" {
+		model = DefaultModel
+	}
+	body := map[string]interface{}{
+		"model":    model,
+		"messages": convertMessagesToOpenAI("You are a helpful assistant that summarizes conversation history concisely.", a.Messages),
+		"stream":   false,
+	}
+	payload, _ := json.Marshal(body)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		var errBody bytes.Buffer
+		errBody.ReadFrom(resp.Body)
+		return nil, fmt.Errorf("API %d: %s", resp.StatusCode, truncateStr(string(errBody.Bytes()), 200, "..."))
+	}
+
+	return parseOpenAINonStreaming(resp.Body)
+}
+
+// supportsThinking reports whether a model name supports extended thinking.
+// Only Claude 3.5+ and Claude 4 models (anthropic) support it; other providers
+// and older model families are excluded.
+func supportsThinking(model string) bool {
+	m := strings.ToLower(model)
+	// Only enable for known Anthropic model families that support thinking.
+	switch {
+	case strings.Contains(m, "claude-sonnet-4"),
+		strings.Contains(m, "claude-3-5-sonnet"),
+		strings.Contains(m, "claude-opus-4"),
+		strings.Contains(m, "claude-3-opus"),
+		strings.Contains(m, "claude-3.5"):
+		return true
+	}
+	return false
 }

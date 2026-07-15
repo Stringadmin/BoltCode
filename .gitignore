@@ -7,18 +7,49 @@ boltcode.exe
 # Go build/test artifacts
 *.test
 *.prof
+coverage.out
+coverage.txt
+*.cover
 
 # BoltCode local state (worktrees are per-machine, never tracked)
 .boltcode/local/
 
 # Local editor/agent state
 .claude/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
-# 开发内部记录，不公开
+# Environment / secrets — never commit credentials
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Wrangler (Cloudflare) local state
+.wrangler/
+
+# Site build output (deployed via gh-pages, not tracked on main)
+site/dist/
+site/node_modules/
+
+# Vendor directory (not used yet, but preemptive)
+vendor/
+
+# Dev internal notes, not public
 conversation-log.md
 
-# 构建产物，release 走 GitHub Releases
+# Build artifacts — releases go via GitHub Releases
 dist/
+
+# Cross-compile outputs
+boltcode-darwin-*
+boltcode-linux-*
+boltcode-windows-*
 
 # OS noise
 .DS_Store

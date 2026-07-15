@@ -8,6 +8,12 @@ project_name: boltcode
 before:
   hooks:
     - go mod tidy
+    # Verify the code builds and tests pass BEFORE cutting a release, so a
+    # broken tag never ships. (CI also runs these on every PR, but this is the
+    # last line of defense at release time.)
+    - go build ./...
+    - go vet ./...
+    - go test ./...
 
 builds:
   - id: boltcode

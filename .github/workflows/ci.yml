@@ -1,0 +1,64 @@
+# CI: build, vet, test, and gofmt-check on every push and PR.
+# Runs across Linux, macOS, and Windows so cross-OS compile/runtime issues
+# surface before a release (the release workflow only runs on ubuntu, so
+# Windows/macOS-only breakages would otherwise ship unnoticed).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+  # gofmt is a separate job (not in the matrix) because formatting is
+  # OS-independent — a single linux run is enough and faster.
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - name: Check gofmt
+        # -l lists files that need formatting; we fail if any are listed.
+        # Note: the repo has some pre-existing gofmt drift; this job flags
+        # NEW drift so it doesn't grow. (Existing drift is tracked separately.)
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "::error::The following files need gofmt:"
+            gofmt -l .
+            exit 1
+          fi

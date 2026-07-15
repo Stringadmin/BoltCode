@@ -240,15 +240,16 @@ func (s *Session) runApprove(args []string, merge bool) {
 		fmt.Println(errStyle.Render("  usage: approve/merge <proposal>"))
 		return
 	}
+	reviewer := s.App.WhoAmI()
 	if !merge {
-		p, err := s.App.Approve(args[0], "human")
+		p, err := s.App.Approve(args[0], reviewer)
 		if err != nil {
 			fmt.Println(errStyle.Render("  " + err.Error()))
 			return
 		}
 		fmt.Println(okStyle.Render(fmt.Sprintf("  approved %s", p.ID)))
 	} else {
-		t, err := s.App.ApproveAndMerge(args[0], "human")
+		t, err := s.App.ApproveAndMerge(args[0], reviewer)
 		if err != nil {
 			fmt.Println(errStyle.Render("  " + err.Error()))
 			return
@@ -270,7 +271,7 @@ func (s *Session) runReject(args []string) {
 		return
 	}
 	note := strings.Join(args[1:], " ")
-	if err := s.App.Reject(args[0], "human", note); err != nil {
+	if err := s.App.Reject(args[0], s.App.WhoAmI(), note); err != nil {
 		fmt.Println(errStyle.Render("  " + err.Error()))
 		return
 	}
@@ -393,7 +394,7 @@ func (s *Session) runConfig(args []string) {
 	name := in
 
 	// Pre-fill from that profile if it exists, else defaults.
-	prefill := &agent.Config{Provider: "anthropic", Model: "claude-sonnet-4-20250514"}
+	prefill := &agent.Config{Provider: "anthropic", Model: agent.DefaultModel}
 	for _, p := range profiles {
 		if p.Name == name {
 			c := p.ToConfig()
@@ -431,7 +432,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 	apiKey := prefill.APIKey
 	model := prefill.Model
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = agent.DefaultModel
 	}
 	baseURL := prefill.BaseURL
 

@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/Stringadmin/BoltCode/internal/fio"
+	"github.com/Stringadmin/BoltCode/internal/sshx"
 )
 
 // RemoteConfig stores the user's self-hosted git server settings.
@@ -69,8 +72,13 @@ func (a *App) LoadRemoteConfig() (*RemoteConfig, error) {
 }
 
 func (a *App) SaveRemoteConfig(rc *RemoteConfig) error {
-	data, _ := json.MarshalIndent(rc, "", "  ")
-	return os.WriteFile(remoteConfigPath(a), data, 0o644)
+	data, err := json.MarshalIndent(rc, "", "  ")
+	if err != nil {
+		return err
+	}
+	// Atomic write: a half-written remote.json would make push/pull fail with a
+	// confusing parse error on the next invocation.
+	return fio.WriteFileAtomic(remoteConfigPath(a), data, 0o644)
 }
 
 // RemoteAdd records the server URL and registers it as a git remote.
@@ -137,6 +145,12 @@ func ParseRemoteURL(url string) (user, host, path string, err error) {
 
 // TestSSH tries to connect to the server and run a simple command. Returns nil
 // if the connection succeeds.
+//
+// StrictHostKeyChecking=accept-new is OpenSSH's TOFU mode: new hosts are
+// accepted and recorded, but a CHANGED key is rejected (MITM protection). This
+// matches sshx.tofuHostKeyCallback's policy, so both SSH code paths (the raw
+// `ssh` binary used here, and the Go ssh client in sshx) enforce the same
+// host-key stance.
 func TestSSH(user, host string) error {
 	cmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new",
 		"-o", "ConnectTimeout=10", user+"@"+host, "echo ok")
@@ -149,37 +163,18 @@ func TestSSH(user, host string) error {
 
 // InitBareRepo creates a bare git repository on the remote server via SSH.
 // path is user-supplied and validated for shell metacharacters before being
-// sent to the remote shell, to prevent command injection.
+// sent to the remote shell, to prevent command injection. The validation and
+// quoting helpers live in sshx so they're shared with sshx.InitBareRepo rather
+// than duplicated here.
 func InitBareRepo(user, host, path string) error {
-	if err := safeRemotePath(path); err != nil {
+	if err := sshx.SafeRemotePath(path); err != nil {
 		return err
 	}
 	cmd := exec.Command("ssh", user+"@"+host,
-		fmt.Sprintf("git init --bare %s 2>&1 || echo 'already exists'", shellQuoteRemote(path)))
+		fmt.Sprintf("git init --bare %s 2>&1 || echo 'already exists'", sshx.ShellQuote(path)))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-// safeRemotePath rejects shell metacharacters in a remote repo path.
-func safeRemotePath(p string) error {
-	for _, r := range p {
-		switch {
-		case r >= 'a' && r <= 'z',
-			r >= 'A' && r <= 'Z',
-			r >= '0' && r <= '9',
-			r == '/', r == '\\', r == '.', r == '-', r == '_', r == '~', r == ' ':
-			// allowed
-		default:
-			return fmt.Errorf("unsafe character %q in repo path %q", r, p)
-		}
-	}
-	return nil
-}
-
-// shellQuoteRemote single-quotes a path for safe shell interpolation.
-func shellQuoteRemote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Push pushes the current branch to the configured remote.

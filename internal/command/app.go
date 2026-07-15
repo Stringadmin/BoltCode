@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Stringadmin/BoltCode/internal/fio"
 	"github.com/Stringadmin/BoltCode/internal/gitx"
 	"github.com/Stringadmin/BoltCode/internal/store"
 )
@@ -38,16 +39,17 @@ func (a *App) LoadConfig() (*Config, error) {
 	return &cfg, nil
 }
 
-// SaveConfig writes the project-level config, preserving fields other callers
-// may have set. Reads the current file (if any), applies the given mutator, and
-// writes it back atomically.
+// SaveConfig writes the project-level config. It overwrites the file in place
+// with what cfg holds. The write is atomic (temp file + rename) so a crash or
+// signal mid-write can't leave a half-written config.json — a corrupt config
+// would silently downgrade a team repo to solo (see IsTeamMode).
 func (a *App) SaveConfig(cfg *Config) error {
 	path := configPath(a.Repo)
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return fio.WriteFileAtomic(path, data, 0o644)
 }
 
 // IsTeamMode reports whether this repo has been upgraded to team collaboration

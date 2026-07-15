@@ -1,13 +1,16 @@
 package shell
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
 	"github.com/Stringadmin/BoltCode/internal/gitx"
 	"github.com/Stringadmin/BoltCode/internal/model"
+	"github.com/Stringadmin/BoltCode/internal/tui"
 )
 
 // runAgent launches the built-in AI agent.
@@ -49,6 +52,10 @@ func (s *Session) runAgentTask(args []string) {
 		fmt.Println(errStyle.Render("  task not found: " + taskID))
 		return
 	}
+	// The worktree path isn't persisted (json:"-") to avoid leaking a
+	// machine-local path into synced team metadata — re-derive it from the
+	// branch, which is deterministic (WorktreeBase + "/" + branch).
+	s.App.ResolveWorktree(t)
 
 	// Transition task to in_progress so conflict detection sees it as active
 	if t.Status == model.TaskOpen {
@@ -95,62 +102,21 @@ func (s *Session) launchAgent(workdir, intent string, task *model.Task) {
 		Workdir:  workdir,
 		RepoRoot: s.App.Repo.Root,
 		Intent:   intent,
+		// Command confirmation is handled by the TUI's confirm popup
+		// (wired in tui.RunChat via a.ConfirmFn).
 	}
 
-	// Command confirmation: ask user before running shell commands
-	a.ConfirmFn = func(cmd string) bool {
-		fmt.Printf("\n  \033[38;5;220m⚠ run:\033[0m %s\n", cmd)
-		s.rl.SetPrompt("  [y/n/a] > ")
-		answer := strings.TrimSpace(s.readLine())
-		s.rl.SetPrompt("  ❯ ")
-		switch strings.ToLower(answer) {
-		case "a", "allow":
-			a.AutoAllow = true
-			return true
-		case "n", "no":
-			return false
-		default:
-			return true
-		}
+	// Launch the chat TUI. The agent runs in a goroutine inside RunChat;
+	// its stdout is captured to a pipe and displayed in the TUI's message
+	// area. The input box stays visible and interactive at all times.
+	if err := tui.RunChat(a); err != nil {
+		fmt.Println(errStyle.Render("  tui error: " + err.Error()))
 	}
 
-	// Switch readline prompt for agent session
-	s.rl.SetPrompt("  ❯ ")
-
-	// Swap in slash-command completion for the duration of the agent session.
-	// readline reads i.Config.AutoComplete on each Readline, so a live swap
-	// works without recreating the instance.
-	prevCompleter := s.rl.Config.AutoComplete
-	s.rl.Config.AutoComplete = newSlashCompleter()
-	defer func() { s.rl.Config.AutoComplete = prevCompleter }()
-
-	// Pass the session's input function so the agent can be conversational.
-	// A lone "/" prints the command list as a preview (a poor man's popup
-	// completion, since readline can't show live hints while typing).
-	inputFn := func() string {
-		line := s.readLine()
-		if line == "/" {
-			printSlashCommandPreview()
-			return ""
-		}
-		return line
-	}
-	// PromptFn prints a (possibly multi-line) prompt via readline's own stdout
-	// writer and reads one line. This keeps the readline line buffer in sync —
-	// plain fmt.Print before a Readline desyncs readline and makes it return
-	// empty immediately (the /profile menu bug).
-	a.PromptFn = func(prompt string) string {
-		// Write the menu/prompt through readline's stdout so it triggers a
-		// refresh instead of fighting the line buffer.
-		fmt.Fprint(s.rl.Stdout(), prompt)
-		return s.readLine()
-	}
-
-	if err := a.Run(inputFn); err != nil {
-		fmt.Println(errStyle.Render("  agent error: " + err.Error()))
-	}
-
-	// After agent finishes: check for uncommitted changes and offer to commit
+	// After agent finishes: check for uncommitted changes and offer to commit.
+	// Use raw stdin (not readline) since the TUI may have left terminal state
+	// in a condition readline doesn't expect.
+	reader := bufio.NewReader(os.Stdin)
 	if gitx.HasChanges(workdir) {
 		fmt.Println()
 		fmt.Println(infoStyle.Render("  uncommitted changes detected:"))
@@ -163,7 +129,8 @@ func (s *Session) launchAgent(workdir, intent string, task *model.Task) {
 		}
 		fmt.Println()
 		fmt.Print("  commit changes? [Y/n/custom message] > ")
-		answer := strings.TrimSpace(s.readLine())
+		answer, _ := reader.ReadString('\n')
+		answer = strings.TrimSpace(answer)
 
 		switch strings.ToLower(answer) {
 		case "n", "no":

@@ -73,4 +73,3 @@ func fileOverlap(a, b []string) []string {
 	}
 	return overlap
 }
-

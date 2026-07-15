@@ -14,7 +14,13 @@ func TestUnknownSlashCommandReturnsFalse(t *testing.T) {
 }
 
 func TestKnownSlashCommandsHandled(t *testing.T) {
-	a := &Agent{Stats: NewStats(), Messages: []Message{{Role: "user", Content: "hi"}}}
+	// /model and /profile now launch interactive pickers that call readWith.
+	// Provide a mock InputFn that returns "q" (cancel) so they complete.
+	a := &Agent{
+		Stats:    NewStats(),
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		InputFn:  func() string { return "q" },
+	}
 	known := []string{"/help", "/tokens", "/time", "/model", "/context", "/sessions", "/files", "/diff", "/clear"}
 	for _, cmd := range known {
 		if !a.handleSlashCommand(cmd) {

@@ -2,13 +2,28 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 )
 
 // modelContextWindow returns the context window size (in tokens) for a model.
-// Falls back to a conservative default if unknown. Values are approximate
-// public specs; users can override via config (TODO).
+// Falls back to a conservative default if unknown.
+//
+// The built-in table covers common models, but new models ship constantly. To
+// override for any model (or a custom gateway model not listed), set the
+// BOLTCODE_CONTEXT_WINDOW environment variable to a token count, e.g.
+//
+//	BOLTCODE_CONTEXT_WINDOW=256000
+//
+// This takes precedence over the table so users are never stuck with a wrong
+// default while waiting for a BoltCode update.
 func modelContextWindow(model string) int {
+	if v := strings.TrimSpace(os.Getenv("BOLTCODE_CONTEXT_WINDOW")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
 	m := strings.ToLower(model)
 	switch {
 	case strings.Contains(m, "claude-sonnet-4"), strings.Contains(m, "claude-3-5-sonnet"):

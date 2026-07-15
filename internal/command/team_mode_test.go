@@ -22,6 +22,9 @@ func setupRepo(t *testing.T) *App {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	// Close the store's lock handle before the temp dir is removed (Windows
+	// can't delete an open file). LIFO cleanup ordering runs this first.
+	t.Cleanup(func() { app.Store.Close() })
 	return app
 }
 
@@ -52,6 +55,7 @@ func TestTeamInitUpgradesMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+	t.Cleanup(func() { app.Store.Close() })
 	if !app.IsTeamMode() {
 		t.Fatal("expected team mode after TeamInit")
 	}
@@ -93,4 +97,3 @@ func mustRunGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
 }
-

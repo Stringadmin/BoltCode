@@ -7,23 +7,38 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"time"
+
+	"github.com/Stringadmin/BoltCode/internal/fio"
 )
+
+// sessionIDRe matches the canonical session id format produced by newSessionID:
+// exactly 8 lowercase hex chars. Validating before building a filesystem path
+// prevents path-traversal attacks via `boltcode --resume ../../etc/passwd`.
+var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}$`)
+
+// validSessionID reports whether id is a well-formed session id. Anything not
+// matching is rejected before it is joined into a filesystem path.
+func validSessionID(id string) bool {
+	return sessionIDRe.MatchString(id)
+}
 
 // Session is a saved agent conversation, persisted to ~/.boltcode/sessions/
 // so a user can resume it later (like `claude --resume <id>`). Stored at user
 // level so sessions are visible across projects; the original Workdir is
 // recorded so resume can re-enter the right directory context.
 type Session struct {
-	ID        string    `json:"id"`
-	Workdir   string    `json:"workdir"`
-	RepoRoot  string    `json:"repo_root,omitempty"`
-	Intent    string    `json:"intent,omitempty"`
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        string     `json:"id"`
+	Workdir   string     `json:"workdir"`
+	RepoRoot  string     `json:"repo_root,omitempty"`
+	Intent    string     `json:"intent,omitempty"`
+	Model     string     `json:"model"`
+	Messages  []Message  `json:"messages"`
+	TodoList  []TodoItem `json:"todo_list,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 // sessionsDir returns ~/.boltcode/sessions/, creating it if needed.
@@ -67,6 +82,7 @@ func SaveSession(a *Agent) (string, error) {
 		Intent:    a.Intent,
 		Model:     a.Config.Model,
 		Messages:  a.Messages,
+		TodoList:  a.TodoList,
 		CreatedAt: created,
 		UpdatedAt: now,
 	}
@@ -75,7 +91,10 @@ func SaveSession(a *Agent) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(sessionsDir(), id+".json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	// Atomic write: a half-written session file would make resume fail with a
+	// confusing parse error. fio.WriteFileAtomic also ensures the sessions dir
+	// exists.
+	if err := fio.WriteFileAtomic(path, data, 0o600); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -83,6 +102,9 @@ func SaveSession(a *Agent) (string, error) {
 
 // LoadSession reads a saved session by id. Returns an error if not found.
 func LoadSession(id string) (*Session, error) {
+	if !validSessionID(id) {
+		return nil, fmt.Errorf("invalid session id: %q", id)
+	}
 	path := filepath.Join(sessionsDir(), id+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -123,6 +145,9 @@ func ListSessions() ([]Session, error) {
 
 // DeleteSession removes a saved session file (best-effort).
 func DeleteSession(id string) error {
+	if !validSessionID(id) {
+		return fmt.Errorf("invalid session id: %q", id)
+	}
 	path := filepath.Join(sessionsDir(), id+".json")
 	return os.Remove(path)
 }

@@ -63,7 +63,7 @@ func loadFromClaudeCode() (*agent.Config, error) {
 
 	model := settings.Env["ANTHROPIC_MODEL"]
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = agent.DefaultModel
 	}
 	baseURL := settings.Env["ANTHROPIC_BASE_URL"]
 
@@ -76,29 +76,12 @@ func loadFromClaudeCode() (*agent.Config, error) {
 }
 
 // SaveProfile upserts a profile by name and makes it the active one. Used by
-// the config wizard when creating/editing a named provider configuration.
+// the config wizard when creating/editing a named provider configuration. This
+// delegates to agent.SaveProfile so the load-modify-save runs under the
+// cross-process profile lock (two `boltcode` processes editing profiles
+// concurrently would otherwise lose an update).
 func SaveProfile(name string, cfg *agent.Config) error {
-	pf, err := agent.LoadProfiles()
-	if err != nil {
-		pf = &agent.ProfileFile{}
-	}
-	p := agent.Profile{
-		Name: name, Provider: cfg.Provider,
-		APIKey: cfg.APIKey, Model: cfg.Model, BaseURL: cfg.BaseURL,
-	}
-	found := false
-	for i := range pf.Profiles {
-		if pf.Profiles[i].Name == name {
-			pf.Profiles[i] = p
-			found = true
-			break
-		}
-	}
-	if !found {
-		pf.Profiles = append(pf.Profiles, p)
-	}
-	pf.Current = name
-	return agent.SaveProfiles(pf)
+	return agent.SaveProfile(name, cfg)
 }
 
 // SaveAgentConfig is a compatibility shim — saves as the "default" profile.

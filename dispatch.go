@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/Stringadmin/BoltCode/internal/banner"
 	"github.com/Stringadmin/BoltCode/internal/command"
@@ -45,6 +46,8 @@ func dispatch(cmd string, args []string) error {
 		return runStatus(wd, args)
 	case "sync":
 		return runSync(wd, args)
+	case "completion":
+		return runCompletion(args)
 	case "team":
 		return runTeam(wd, args)
 	case "tui":
@@ -59,15 +62,22 @@ func dispatch(cmd string, args []string) error {
 	}
 }
 
-// popFlag extracts "--name value" pairs from args, returning the value (or def)
-// and the remaining positional args. Minimal by design — we only have two flags.
+// popFlag extracts "--name value" and "--name=value" pairs from args, returning
+// the value (or def) and the remaining positional args. Minimal by design — we
+// only have a few flags; for anything richer, switch to a real flag parser.
 func popFlag(args []string, name, def string) (string, []string) {
 	out := def
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == name && i+1 < len(args) {
+			// --name value (space-separated)
 			out = args[i+1]
 			i++
+			continue
+		}
+		if prefix := name + "="; strings.HasPrefix(args[i], prefix) {
+			// --name=value (equals form)
+			out = strings.TrimPrefix(args[i], prefix)
 			continue
 		}
 		rest = append(rest, args[i])

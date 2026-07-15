@@ -124,3 +124,46 @@ func TestDeleteSession(t *testing.T) {
 		t.Fatal("session should be gone after delete")
 	}
 }
+
+// --- path-traversal protection (P0) ---
+// LoadSession/DeleteSession must reject malformed ids before joining them into
+// a filesystem path, so `boltcode --resume ../../etc/passwd` can't read or
+// delete arbitrary files.
+
+func TestLoadSessionRejectsTraversalID(t *testing.T) {
+	restore := withTempHomeForSessions(t)
+	defer restore()
+	bad := []string{
+		"../../etc/passwd",
+		"..\\..\\windows\\system32",
+		"nonexistent", // wrong length / not hex
+		"ZZZZZZZZ",    // not hex
+		"abcdefg",     // 7 chars
+		"abcdefghi",   // 9 chars
+	}
+	for _, id := range bad {
+		if _, err := LoadSession(id); err == nil {
+			t.Errorf("LoadSession(%q) should reject malformed id", id)
+		}
+	}
+}
+
+func TestDeleteSessionRejectsTraversalID(t *testing.T) {
+	restore := withTempHomeForSessions(t)
+	defer restore()
+	if err := DeleteSession("../../etc/passwd"); err == nil {
+		t.Fatal("DeleteSession must reject traversal id")
+	}
+}
+
+func TestLoadSessionAcceptsWellFormedID(t *testing.T) {
+	restore := withTempHomeForSessions(t)
+	defer restore()
+	a := &Agent{Messages: []Message{{Role: "user", Content: "x"}}}
+	id, _ := SaveSession(a)
+	// The saved id must be loadable (round-trip), proving validation doesn't
+	// reject legitimate ids.
+	if _, err := LoadSession(id); err != nil {
+		t.Fatalf("LoadSession(legit %q): %v", id, err)
+	}
+}

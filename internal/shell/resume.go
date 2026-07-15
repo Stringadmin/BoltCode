@@ -58,7 +58,13 @@ func listAndPickSession(version string) error {
 	fmt.Print("  resume which? [id / Enter=latest / q=quit]: ")
 
 	reader := bufio.NewReader(os.Stdin)
-	line, _ := reader.ReadString('\n')
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		// EOF (Ctrl-D) or read error: cancel rather than silently resuming
+		// the latest session.
+		fmt.Println()
+		return nil
+	}
 	line = strings.TrimSpace(line)
 	if line == "q" || line == "quit" {
 		return nil
@@ -84,13 +90,14 @@ func startResumedAgent(version string, s *agent.Session) error {
 	}
 
 	a := &agent.Agent{
-		Config:            *cfg,
-		Workdir:           s.Workdir,
-		RepoRoot:          s.RepoRoot,
-		Intent:            s.Intent,
-		Messages:          s.Messages,
-		SessionID:         s.ID,
-		SessionCreatedAt:  &s.CreatedAt,
+		Config:           *cfg,
+		Workdir:          s.Workdir,
+		RepoRoot:         s.RepoRoot,
+		Intent:           s.Intent,
+		Messages:         s.Messages,
+		TodoList:         s.TodoList,
+		SessionID:        s.ID,
+		SessionCreatedAt: &s.CreatedAt,
 	}
 
 	// If the saved model differs, honor it so resume uses what the session had.
@@ -115,9 +122,20 @@ func startResumedAgent(version string, s *agent.Session) error {
 		fmt.Printf("\n  \033[38;5;220m⚠ run:\033[0m %s\n", cmd)
 		fmt.Print("  [y/n] > ")
 		buf := make([]byte, 64)
-		n, _ := os.Stdin.Read(buf)
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			// EOF / read error: never approve a command on a failed read.
+			fmt.Println(infoStyle.Render("  command skipped"))
+			return false
+		}
 		ans := strings.ToLower(strings.TrimSpace(string(buf[:n])))
-		return ans != "n" && ans != "no"
+		// Require an explicit yes; anything else (including empty/EOF) denies.
+		// Previously "" approved the command, so Ctrl-D ran it.
+		if ans == "y" || ans == "yes" {
+			return true
+		}
+		fmt.Println(infoStyle.Render("  command skipped"))
+		return false
 	}
 
 	return a.Run(inputFn)

@@ -4,11 +4,13 @@ package agent
 var Tools = []map[string]interface{}{
 	{
 		"name":        "read_file",
-		"description": "Read the contents of a file.",
+		"description": "Read the contents of a file. Supports optional offset (1-based line number to start from) and limit (number of lines to read). Use these for large files to avoid filling the context window.",
 		"input_schema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]string{"type": "string", "description": "File path relative to working directory"},
+				"path":   map[string]string{"type": "string", "description": "File path relative to working directory"},
+				"offset": map[string]string{"type": "string", "description": "Line number to start reading from (1-based). If omitted, starts from line 1."},
+				"limit":  map[string]string{"type": "string", "description": "Maximum number of lines to read. If omitted, reads the entire file."},
 			},
 			"required": []string{"path"},
 		},
@@ -84,8 +86,6 @@ var Tools = []map[string]interface{}{
 			"required": []string{"key", "value"},
 		},
 	},
-	// todo: a lightweight task planner so the agent can break complex work
-	// into trackable steps and not lose the thread in long sessions.
 	{
 		"name":        "todo_write",
 		"description": "Create or replace the task list for the current session. Use this to plan multi-step work up front, then mark items in_progress/completed as you go. An empty list clears it.",
@@ -97,8 +97,8 @@ var Tools = []map[string]interface{}{
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"content":     map[string]string{"type": "string"},
-							"status":      map[string]string{"type": "string", "description": "pending | in_progress | completed"},
+							"content": map[string]string{"type": "string"},
+							"status":  map[string]string{"type": "string", "description": "pending | in_progress | completed"},
 						},
 						"required": []string{"content", "status"},
 					},
@@ -127,6 +127,91 @@ var Tools = []map[string]interface{}{
 				},
 			},
 			"required": []string{"path", "edits"},
+		},
+	},
+	{
+		"name":        "delete_file",
+		"description": "Delete a file or an empty directory. Use when removing dead code, deprecated files, or empty directories. Will NOT delete non-empty directories.",
+		"input_schema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]string{"type": "string", "description": "Path to the file or empty directory to delete"},
+			},
+			"required": []string{"path"},
+		},
+	},
+	{
+		"name":        "rename_file",
+		"description": "Rename or move a file or directory. Use for refactoring: renaming a file to a new name, moving it to a new directory, or both. Creates parent directories of the destination if needed.",
+		"input_schema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"from": map[string]string{"type": "string", "description": "Current path"},
+				"to":   map[string]string{"type": "string", "description": "New path"},
+			},
+			"required": []string{"from", "to"},
+		},
+	},
+	{
+		"name":        "web_fetch",
+		"description": "Fetch a URL and return its text content. Use to read documentation, API specs, package READMEs, or any web resource needed during development. Returns the raw text — use for reference, not user-facing display.",
+		"input_schema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url": map[string]string{"type": "string", "description": "Full URL to fetch (https://...)"},
+			},
+			"required": []string{"url"},
+		},
+	},
+	{
+		"name":        "git_status",
+		"description": "Show the working tree status — modified, staged, and untracked files. Use before committing to review what changed, or to check if the working tree is clean.",
+		"input_schema": map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	},
+	{
+		"name":        "git_diff",
+		"description": "Show the diff of uncommitted changes. Use to review what you've changed before committing, or to inspect the exact modifications made so far.",
+		"input_schema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]string{"type": "string", "description": "Optional: show diff only for this file path"},
+			},
+		},
+	},
+	{
+		"name":        "git_commit",
+		"description": "Stage all changes and create a commit with a given message. Use after completing a logical unit of work so progress is saved in git history. The commit is created in the agent's working directory.",
+		"input_schema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"message": map[string]string{"type": "string", "description": "Commit message describing what was done"},
+			},
+			"required": []string{"message"},
+		},
+	},
+	{
+		"name":        "get_diagnostics",
+		"description": "Run a diagnostic/lint command (e.g. 'go vet', 'tsc --noEmit', 'cargo check') and return the output. Use after making changes to verify code correctness before committing. The command is loaded from project memory (test_cmd / build_cmd), or falls back to detecting the project type.",
+		"input_schema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"command": map[string]string{"type": "string", "description": "Optional: specific command to run. Defaults to the project's configured diagnostic command."},
+			},
+		},
+	},
+	{
+		"name":        "glob",
+		"description": "Find files matching a glob pattern. Use to locate files by name pattern rather than searching file contents. Supports ** for recursive matching (e.g. '**/*.go', 'src/**/*.ts', '**/*test*').",
+		"input_schema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"pattern": map[string]string{"type": "string", "description": "Glob pattern (e.g. '**/*.go', 'src/**/*.ts', '*.md')"},
+				"path":    map[string]string{"type": "string", "description": "Directory to search in (default: current dir)"},
+			},
+			"required": []string{"pattern"},
 		},
 	},
 }

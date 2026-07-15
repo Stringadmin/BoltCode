@@ -11,7 +11,15 @@ import (
 // Approve marks a proposal approved. It does NOT merge by itself — merging is a
 // separate, explicit step (ApproveAndMerge) so a human can approve in bulk and
 // merge deliberately. AI tools never have a path to either.
+//
+// The proposal state transition is wrapped in the store-wide lock so two
+// reviewers can't race (one approving, one rejecting) and produce a
+// contradictory result.
 func (a *App) Approve(proposalID, author string) (*model.Proposal, error) {
+	if err := a.Store.Lock(); err != nil {
+		return nil, err
+	}
+	defer a.Store.Unlock()
 	p, err := a.Store.GetProposal(proposalID)
 	if err != nil {
 		return nil, err

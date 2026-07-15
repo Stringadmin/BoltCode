@@ -10,6 +10,7 @@ package gitx
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -17,6 +18,22 @@ import (
 // Repo is a handle to a git repository rooted at Root (the main worktree).
 type Repo struct {
 	Root string
+}
+
+// gitEnv returns the environment for git commands run by BoltCode. It forces
+// GIT_TERMINAL_PROMPT=0 so git fails fast instead of hanging forever waiting
+// for a username/password on an unauthenticated or slow remote — a hang that
+// would freeze the whole session with no way for the user to know why.
+func gitEnv() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "GIT_TERMINAL_PROMPT=") {
+			out = append(out, kv)
+		}
+	}
+	out = append(out, "GIT_TERMINAL_PROMPT=0")
+	return out
 }
 
 // run executes a git command inside the repo root and returns trimmed stdout.
@@ -45,6 +62,7 @@ func (r *Repo) ConfigUser() string {
 func runIn(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	cmd.Env = gitEnv()
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf

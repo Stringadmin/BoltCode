@@ -4,9 +4,15 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 )
+
+// DefaultModel is the model used when a profile/config doesn't specify one.
+// Centralized here so a model bump is a one-line change rather than a hunt
+// across api.go, commands.go, and agent_config.go.
+const DefaultModel = "claude-sonnet-4-20250514"
 
 // Config holds the API configuration for the AI agent.
 type Config struct {
@@ -45,7 +51,7 @@ type Agent struct {
 	Intent    string // what the user wants done
 	Messages  []Message
 	Stats     *Stats
-	AutoAllow bool   // session-level "allow all commands" flag
+	AutoAllow bool                  // session-level "allow all commands" flag
 	ConfirmFn func(cmd string) bool // ask user before running commands
 	// InputFn reads a line of user input. Set by Run so slash commands that
 	// need follow-up input (like /profile's interactive picker) can read it.
@@ -65,6 +71,34 @@ type Agent struct {
 	// TodoList is the agent's task plan for the current session, managed via
 	// the todo_write tool. Rendered in the footer so progress stays visible.
 	TodoList []TodoItem
+	// ToolErrorCount tracks consecutive tool-failure rounds for self-repair. The
+	// system prompt advertises "max 3 retries"; after reaching this limit, the
+	// loop stops injecting the nudge and the AI's next response is passed back
+	// to the user without another retry attempt. Reset on any error-free round
+	// or when the user provides new input.
+	ToolErrorCount int
+
+	// ShouldExit is set by /exit (via the slash-command picker) to signal the
+	// agent loop to terminate. The loop checks this at the top of its inner
+	// input-wait cycle.
+	ShouldExit bool
+
+	// NoSpinner disables the animated spinner. Used by the TUI which has its
+	// own status display.
+	NoSpinner bool
+
+	// cancelFn cancels the in-flight API request when invoked. Set by callAPI
+	// on each round; used by the Ctrl+C interrupt handler to stop a long
+	// response without killing the process.
+	cancelFn context.CancelFunc
+}
+
+// CancelRequest interrupts an in-flight API call, if one is active.
+// Safe to call from any goroutine (used by the shell's Ctrl+C handler).
+func (a *Agent) CancelRequest() {
+	if a.cancelFn != nil {
+		a.cancelFn()
+	}
 }
 
 // TodoItem is one step in the agent's session task plan.
@@ -91,4 +125,8 @@ type ToolResult struct {
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 	IsError   bool   `json:"is_error,omitempty"`
+	// Diff carries a compact before→after preview for edit operations. It is
+	// NOT sent to the AI (json:"-"); it's only used by printToolResult to give
+	// the user immediate visual feedback of what changed.
+	Diff string `json:"-"`
 }

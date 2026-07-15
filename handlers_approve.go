@@ -21,7 +21,7 @@ func runApprove(wd string, args []string, merge bool) error {
 	if err := app.RequireTeam(map[bool]string{true: "merge", false: "approve"}[merge]); err != nil {
 		return err
 	}
-	const author = "human" // TODO: derive from git config user.name
+	author := app.WhoAmI() // derive reviewer identity from git config, not a hardcoded "human"
 
 	if !merge {
 		p, err := app.Approve(args[0], author)
@@ -54,7 +54,7 @@ func runReject(wd string, args []string) error {
 		return err
 	}
 	note := strings.TrimSpace(strings.Join(args[1:], " "))
-	if err := app.Reject(args[0], "human", note); err != nil {
+	if err := app.Reject(args[0], app.WhoAmI(), note); err != nil {
 		return err
 	}
 	fmt.Printf("rejected %s — task reopened for the AI to revise\n", args[0])

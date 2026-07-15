@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Stringadmin/BoltCode/internal/fio"
 	"github.com/Stringadmin/BoltCode/internal/gitx"
 )
 
@@ -33,8 +34,14 @@ func Init(wd, user string) error {
 	if _, err := os.Stat(configPath(repo)); err == nil {
 		return fmt.Errorf("boltcode already initialized in %s", repo.Root)
 	}
-	if _, err := NewJSONStore(repo); err != nil {
-		return err
+	// Ensure the metadata directory layout exists. We create the dirs directly
+	// rather than via NewJSONStore, because NewJSONStore opens a cross-process
+	// lock file whose handle would leak here (Init discards the store). Load
+	// opens the real store later.
+	for _, sub := range []string{"tasks", "proposals", "reviews", "local"} {
+		if err := os.MkdirAll(filepath.Join(dataDir(repo), sub), 0o755); err != nil {
+			return err
+		}
 	}
 
 	base, err := repo.CurrentBranch()
@@ -51,8 +58,11 @@ func Init(wd, user string) error {
 		user = repo.ConfigUser()
 	}
 	cfg := Config{DefaultBase: base, User: user, Mode: "solo"}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(configPath(repo), data, 0o644); err != nil {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := fio.WriteFileAtomic(configPath(repo), data, 0o644); err != nil {
 		return err
 	}
 	if err := excludeWorktrees(repo); err != nil {

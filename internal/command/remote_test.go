@@ -4,12 +4,12 @@ import "testing"
 
 func TestParseRemoteURL(t *testing.T) {
 	tests := []struct {
-		name             string
-		url              string
-		wantUser         string
-		wantHost         string
-		wantPath         string
-		wantErr          bool
+		name     string
+		url      string
+		wantUser string
+		wantHost string
+		wantPath string
+		wantErr  bool
 	}{
 		{"standard", "root@192.168.1.1:repo.git", "root", "192.168.1.1", "repo.git", false},
 		{"with path", "deploy@myserver.com:/opt/repos/project.git", "deploy", "myserver.com", "/opt/repos/project.git", false},

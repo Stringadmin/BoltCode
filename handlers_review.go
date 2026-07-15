@@ -3,12 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/Stringadmin/BoltCode/internal/command"
 )
 
-// runReview lists proposals awaiting human review.
+// runReview lists proposals awaiting human review, or handles review subcommands.
 func runReview(wd string, args []string) error {
 	app, err := command.Load(wd)
 	if err != nil {
@@ -17,6 +18,12 @@ func runReview(wd string, args []string) error {
 	if err := app.RequireTeam("review"); err != nil {
 		return err
 	}
+
+	// Subcommands
+	if len(args) > 0 && args[0] == "comment" {
+		return runReviewComment(app, args[1:])
+	}
+
 	pending, err := app.ListPending()
 	if err != nil {
 		return err
@@ -64,5 +71,35 @@ func runDiff(wd string, args []string) error {
 		return nil
 	}
 	fmt.Fprintln(os.Stdout, diff)
+	return nil
+}
+
+// runReviewComment adds an inline review comment to a proposal.
+// Usage: boltcode review comment <proposal> [--file x.go] [--line 42] <text>
+func runReviewComment(app *command.App, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: boltcode review comment <proposal> [--file x.go] [--line N] <comment>")
+	}
+	proposalID := args[0]
+	file, rest := popFlag(args[1:], "--file", "")
+	lineStr, rest := popFlag(rest, "--line", "0")
+	line, _ := strconv.Atoi(lineStr)
+	body := strings.TrimSpace(strings.Join(rest, " "))
+	if body == "" {
+		return fmt.Errorf("comment body is required")
+	}
+	who := app.WhoAmI()
+	if err := app.AddComment(proposalID, who, body, file, line); err != nil {
+		return err
+	}
+	loc := ""
+	if file != "" {
+		loc = fmt.Sprintf(" [%s", file)
+		if line > 0 {
+			loc += fmt.Sprintf(":%d", line)
+		}
+		loc += "]"
+	}
+	fmt.Printf("comment added to %s%s\n", proposalID, loc)
 	return nil
 }

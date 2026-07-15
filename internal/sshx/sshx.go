@@ -37,8 +37,10 @@ func tofuHostKeyCallback() ssh.HostKeyCallback {
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		khPath := knownHostsPath()
 
-		// Ensure ~/.ssh exists
-		os.MkdirAll(filepath.Dir(khPath), 0o700)
+		// Ensure ~/.ssh exists (0o700: SSH refuses world-readable ~/.ssh).
+		if err := os.MkdirAll(filepath.Dir(khPath), 0o700); err != nil {
+			return fmt.Errorf("cannot create ~/.ssh: %w", err)
+		}
 
 		// Try loading existing known_hosts
 		if _, err := os.Stat(khPath); err == nil {
@@ -57,9 +59,10 @@ func tofuHostKeyCallback() ssh.HostKeyCallback {
 			}
 		}
 
-		// TOFU: accept and record the key
+		// TOFU: accept and record the key. 0o600 so hostnames/keys aren't
+		// world-readable on shared machines.
 		line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
-		f, err := os.OpenFile(khPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(khPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			return fmt.Errorf("cannot write known_hosts: %w", err)
 		}
@@ -138,17 +141,20 @@ func CopyPublicKey(client *ssh.Client) error {
 // before being interpolated into the remote command — otherwise a path like
 // "x; rm -rf ~" would execute on the server.
 func InitBareRepo(client *ssh.Client, repoPath string) (string, error) {
-	if err := safeRemotePath(repoPath); err != nil {
+	if err := SafeRemotePath(repoPath); err != nil {
 		return "", err
 	}
-	return RunCommand(client, fmt.Sprintf("git init --bare %s 2>&1", shellQuote(repoPath)))
+	return RunCommand(client, fmt.Sprintf("git init --bare %s 2>&1", ShellQuote(repoPath)))
 }
 
-// safeRemotePath rejects paths containing characters that could break out of
+// SafeRemotePath rejects paths containing characters that could break out of
 // the shell command context. Bare-repo paths are filesystem paths, so we allow
 // alphanumerics, path separators, dots, dashes, underscores, tilde and spaces —
 // anything else (semicolons, backticks, $, etc.) is refused.
-func safeRemotePath(p string) error {
+//
+// Exported so command/remote.go (which builds its own SSH command strings for
+// InitBareRepo) can share the same validation instead of duplicating it.
+func SafeRemotePath(p string) error {
 	for _, r := range p {
 		switch {
 		case r >= 'a' && r <= 'z',
@@ -163,9 +169,10 @@ func safeRemotePath(p string) error {
 	return nil
 }
 
-// shellQuote wraps s in single quotes for safe shell interpolation, escaping
-// any embedded single quotes. Used as defense in depth alongside safeRemotePath.
-func shellQuote(s string) string {
+// ShellQuote wraps s in single quotes for safe shell interpolation, escaping
+// any embedded single quotes. Used as defense in depth alongside SafeRemotePath.
+// Exported for the same reason as SafeRemotePath.
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 

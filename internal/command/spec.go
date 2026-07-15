@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Stringadmin/BoltCode/internal/fio"
 )
 
 // specPath returns the path to the project spec file.
@@ -26,9 +28,10 @@ func (a *App) SpecContent() (string, error) {
 	return string(data), nil
 }
 
-// SpecWrite writes or overwrites the project spec.
+// SpecWrite writes or overwrites the project spec. The write is atomic so an
+// interrupted `boltcode spec edit` can't leave a truncated spec.md.
 func (a *App) SpecWrite(content string) error {
-	return os.WriteFile(specPath(a), []byte(content), 0o644)
+	return fio.WriteFileAtomic(specPath(a), []byte(content), 0o644)
 }
 
 // SpecPath returns the absolute path to the spec file (exported for the editor).

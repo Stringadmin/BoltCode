@@ -23,6 +23,14 @@ func main() {
 		return
 	}
 
+	// `boltcode --version` / `-v`: print the version and exit. Handled before
+	// dispatch (which would otherwise load a git repo and report "unknown
+	// command"). Goreleaser injects the real version via -ldflags.
+	if len(os.Args) >= 2 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Printf("boltcode version %s\n", Version)
+		return
+	}
+
 	if len(os.Args) < 2 {
 		// No args: enter interactive session (like Claude Code)
 		if err := shell.Run(Version); err != nil {
@@ -40,11 +48,14 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `boltcode — a built-in AI coding agent with an optional team-collaboration layer
 
+  boltcode --version        print the version and exit
+  boltcode --help | help    show this help
+
 BoltCode runs in two modes:
   - SOLO (default): one person + the built-in AI agent. Open a coding session,
-    edit, commit. Zero setup beyond ` + "`boltcode init`" + `.
+    edit, commit. Zero setup beyond `+"`boltcode init`"+`.
   - TEAM: many people × many AI agents. Worktree isolation per task, proposals,
-    human review, and team sync over git. Upgrade with ` + "`boltcode team init`" + `.
+    human review, and team sync over git. Upgrade with `+"`boltcode team init`"+`.
 
 The recommended way to use BoltCode is the interactive session: just run
   boltcode
@@ -66,7 +77,7 @@ resume a saved conversation (sessions auto-save when an agent session ends):
 
   team-mode only:
   task new <intent>        create a task + isolated worktree
-  task ls / task claim <id>
+  task ls / task claim <id> / task abandon <id>
   submit <task> <summary>  submit work as a proposal
   review / diff <proposal> / approve / merge / reject
   status                   team dashboard
@@ -86,8 +97,9 @@ one-off CLI subcommands (non-interactive):
   boltcode push / pull
   boltcode spec init | (show) | edit
   boltcode tui                   interactive review interface
-  boltcode [team-only] task new|ls|claim | submit | review | diff |
+  boltcode [team-only] task new|ls|claim|abandon | submit | review | diff |
                                  approve | merge | reject | status | sync
+  boltcode completion bash|zsh|fish   generate shell completion script
 
 flags (for 'task new'):
   --base <branch>   base branch (default: current)

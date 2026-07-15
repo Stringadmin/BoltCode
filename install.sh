@@ -7,7 +7,14 @@
 # Or from the GitHub raw URL directly:
 #   curl -fsSL https://raw.githubusercontent.com/Stringadmin/BoltCode/main/install.sh | sh
 #
+# Insecure piped installs are risky, so this script verifies the SHA-256
+# checksum published alongside each release (checksums.txt, produced by
+# GoReleaser) before extracting or running anything. A MITM or a tampered
+# asset is rejected.
 set -eu
+# pipefail makes the curl|grep|head pipelines fail if curl fails, instead of
+# silently swallowing the error when head closes the pipe early.
+set -o pipefail 2>/dev/null || true
 
 OWNER="Stringadmin"
 REPO="BoltCode"
@@ -34,10 +41,11 @@ echo "Fetching the latest BoltCode release..."
 # Query the latest release to find the matching asset. We match on the
 # OS/arch name pattern used by GoReleaser (see .goreleaser.yml).
 API_URL="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
-ASSET_URL=$(curl -fsSL "$API_URL" \
+ASSET_URL=$(curl -fsSL --retry 3 --max-time 30 "$API_URL" \
   | grep "browser_download_url" \
   | grep "${OS}" \
   | grep "${ARCH}" \
+  | grep -v "checksums" \
   | head -n 1 \
   | sed -E 's/.*"(https:\/\/[^"]+)".*/\1/')
 
@@ -56,13 +64,48 @@ else
   echo "(installing to ${INSTALL_DIR} requires sudo)"
 fi
 
-# --- download, extract, install ----------------------------------------------
+# --- download, verify, extract, install ---------------------------------------
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "Downloading ${ASSET_URL##*/}..."
-ARCHIVE="${TMPDIR}/${ASSET_URL##*/}"
-curl -fsSL "$ASSET_URL" -o "$ARCHIVE"
+ARCHIVE_NAME="${ASSET_URL##*/}"
+ARCHIVE="${TMPDIR}/${ARCHIVE_NAME}"
+echo "Downloading ${ARCHIVE_NAME}..."
+curl -fsSL --retry 3 --max-time 120 "$ASSET_URL" -o "$ARCHIVE"
+
+# Verify the SHA-256 checksum published in the release. GoReleaser writes
+# checksums.txt as "<sha256>  <filename>" lines; fetch it, find the line for
+# this archive, and compare against the locally computed digest. This is the
+# critical defense against a tampered or MITM'd download.
+CHECKSUMS_URL=$(echo "$ASSET_URL" | sed -E 's|/[^/]+$|/checksums.txt|')
+CHECKSUMS="${TMPDIR}/checksums.txt"
+if curl -fsSL --retry 3 --max-time 30 "$CHECKSUMS_URL" -o "$CHECKSUMS"; then
+  EXPECTED=$(grep "  ${ARCHIVE_NAME}\$" "$CHECKSUMS" | awk '{print $1}')
+  if [ -z "$EXPECTED" ]; then
+    echo "Checksum file found, but no entry for ${ARCHIVE_NAME}." >&2
+    echo "Refusing to install an unverified binary." >&2
+    exit 1
+  fi
+  ACTUAL=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "Checksum verification FAILED for ${ARCHIVE_NAME}." >&2
+    echo "  expected: ${EXPECTED}" >&2
+    echo "  actual:   ${ACTUAL}" >&2
+    echo "The download may be corrupted or tampered with. Aborting." >&2
+    exit 1
+  fi
+  echo "Checksum verified."
+else
+  echo "WARNING: could not download checksums.txt — the binary will NOT be" >&2
+  echo "verified. Install at your own risk, or download manually from:" >&2
+  echo "  https://github.com/${OWNER}/${REPO}/releases" >&2
+  printf "  proceed anyway? [y/N] "
+  read -r ANSWER
+  case "$ANSWER" in
+    y|Y|yes|YES) ;;
+    *) echo "Aborting."; exit 1 ;;
+  esac
+fi
 
 echo "Extracting..."
 case "$ASSET_URL" in

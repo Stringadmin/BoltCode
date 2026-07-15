@@ -10,23 +10,23 @@ import (
 // raw escapes scattered through the code — keeps the look consistent and easy
 // to retune.
 const (
-	ansiReset    = "\033[0m"
-	ansiBold     = "\033[1m"
+	ansiReset     = "\033[0m"
+	ansiBold      = "\033[1m"
 	ansiDim       = "\033[2m"
-	ansiItalic   = "\033[3m"
+	ansiItalic    = "\033[3m"
 	ansiUnderline = "\033[4m"
-	ansiCyan     = "\033[38;5;75m"
-	ansiGreen    = "\033[38;5;78m"
-	ansiYellow   = "\033[38;5;220m"
-	ansiGray     = "\033[38;5;245m"
-	ansiDarkGray = "\033[38;5;241m"
-	ansiWhite    = "\033[97m"
-	ansiRed      = "\033[38;5;196m"
-	ansiMagenta  = "\033[38;5;141m"
-	ansiBlue     = "\033[38;5;69m"
-	ansiOrange   = "\033[38;5;208m"
-	ansiBgGray   = "\033[48;5;236m"
-	ansiBgBlue   = "\033[48;5;24m"
+	ansiCyan      = "\033[38;5;75m"
+	ansiGreen     = "\033[38;5;78m"
+	ansiYellow    = "\033[38;5;220m"
+	ansiGray      = "\033[38;5;245m"
+	ansiDarkGray  = "\033[38;5;241m"
+	ansiWhite     = "\033[97m"
+	ansiRed       = "\033[38;5;196m"
+	ansiMagenta   = "\033[38;5;141m"
+	ansiBlue      = "\033[38;5;69m"
+	ansiOrange    = "\033[38;5;208m"
+	ansiBgGray    = "\033[48;5;236m"
+	ansiBgBlue    = "\033[48;5;24m"
 )
 
 // divider prints a soft horizontal rule the width of the content area.
@@ -431,6 +431,9 @@ func printToolFooter(success bool, msg string) {
 	} else {
 		fmt.Printf("  "+ansiDarkGray+"╰─"+ansiReset+" "+ansiRed+"✗"+ansiReset+" "+ansiRed+"%s"+ansiReset+"\n", msg)
 	}
+	if !tuiMode {
+		fmt.Print("  \033[38;5;75m❯\033[0m\n") // persistent prompt (shell mode only)
+	}
 }
 
 // toolDurationLabel renders an elapsed duration compactly for tool footers.
@@ -443,6 +446,3 @@ func toolDurationLabel(d time.Duration) string {
 	}
 	return fmt.Sprintf("%.1fs", d.Seconds())
 }
-
-// Suppress unused import warning
-var _ = fmt.Sprint

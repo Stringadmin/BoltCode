@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -104,15 +106,21 @@ For any multi-step task (3+ steps), create a todo list FIRST with todo_write, ma
 - After completing work: summarize files changed and what was done
 
 ## Context
-- Task: %s
-- Working directory: %s
+- Task: {{TASK}}
+- Working directory: {{WORKDIR}}
 - Your code will be reviewed by teammates. Write accordingly.`
 
 // Run starts the agent loop with all features: spinner, stats, slash commands.
 // If a.Messages is pre-populated (a resumed session), the initial project-scan
 // greeting is skipped and the conversation continues from where it left off.
 func (a *Agent) Run(inputFn func() string) error {
-	system := fmt.Sprintf(codeSystemPrompt, a.Intent, a.Workdir)
+	// Build the system prompt. Using strings.NewReplacer (not fmt.Sprintf)
+	// means a literal "%" in the 100-line prompt — e.g. a future "100% width"
+	// CSS note — won't be misread as a format verb and garble the prompt.
+	system := strings.NewReplacer(
+		"{{TASK}}", a.Intent,
+		"{{WORKDIR}}", a.Workdir,
+	).Replace(codeSystemPrompt)
 	a.Stats = NewStats()
 	a.InputFn = inputFn // expose to slash commands needing follow-up input
 
@@ -149,6 +157,19 @@ func (a *Agent) Run(inputFn func() string) error {
 		fmt.Println()
 		fmt.Printf("  "+ansiDarkGray+"↻ resumed session"+ansiReset+" %s"+ansiDarkGray+" · %d messages · continue where you left off"+ansiReset+"\n\n",
 			a.SessionID, len(a.Messages))
+		// Auto-compact if the resumed session is large enough to risk
+		// overflowing the context window on the first API call.
+		window := modelContextWindow(a.Config.Model)
+		est := estimateTokens(a.Messages)
+		if est > 0 && shouldCompact(est, window) {
+			fmt.Printf("  "+ansiYellow+"⚡ context ~%s — compacting before resume..."+ansiReset+"\n",
+				formatTokens(est))
+			if err := a.compactMessages(8); err != nil {
+				fmt.Printf("  "+ansiRed+"✗ compaction failed: %v"+ansiReset+"\n", err)
+			} else {
+				fmt.Printf("  "+ansiGreen+"✓ compacted to %d messages"+ansiReset+"\n", len(a.Messages))
+			}
+		}
 	}
 
 	for round := 0; round < 100; round++ {
@@ -159,14 +180,24 @@ func (a *Agent) Run(inputFn func() string) error {
 		resp, usage, err := a.callAPI(system)
 
 		spin.Stop()
+		if !tuiMode {
+			fmt.Print("  ❯\n") // prompt stays visible after spinner (shell mode)
+		}
 
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				// User pressed Ctrl+C — don't kill the session, just abort this
+				// round and return to the input prompt.
+				fmt.Println("  " + ansiYellow + "⚡ interrupted — type to continue, or 'exit' to quit" + ansiReset)
+				a.ToolErrorCount = 0
+				continue
+			}
 			return fmt.Errorf("API error: %w", err)
 		}
 
 		// Track token usage. LastInput (from the most recent API response) is
 		// the authoritative current context size.
-		a.Stats.Add(usage.InputTokens, usage.OutputTokens)
+		a.Stats.Add(a.Config.Model, usage.InputTokens, usage.OutputTokens)
 
 		toolCalls := a.processResponse(resp)
 
@@ -178,39 +209,61 @@ func (a *Agent) Run(inputFn func() string) error {
 				a.autoCompact()
 			}
 
-			fmt.Println()
-			fmt.Println(divider())
-			fmt.Printf("  "+ansiDarkGray+"⏱ %-8s  ◆ %d tokens  🔧 %d tools  🔄 %d rounds"+ansiReset+"\n",
-				formatDuration(a.Stats.Elapsed()),
-				a.Stats.InputTokens+a.Stats.OutputTokens,
-				a.Stats.ToolCalls, a.Stats.Rounds)
-			fmt.Printf("  %s\n", contextBar(a.currentContextTokens(), window))
-			if todoLine := a.todoProgressLine(); todoLine != "" {
-				fmt.Printf("  %s\n", todoLine)
-			}
-			input := inputFn()
-
-			// Empty input = just pressed Enter, keep waiting
-			if input == "" {
-				continue
+			// In TUI mode the status bar shows tokens/tools/rounds/context, so
+			// skip the inline footer to avoid duplicate noise.
+			if !tuiMode {
+				fmt.Println()
+				fmt.Println(divider())
+				fmt.Printf("  "+ansiDarkGray+"⏱ %-8s  ◆ %d tokens  🔧 %d tools  🔄 %d rounds"+ansiReset+"\n",
+					formatDuration(a.Stats.Elapsed()),
+					a.Stats.InputTokens+a.Stats.OutputTokens,
+					a.Stats.ToolCalls, a.Stats.Rounds)
+				fmt.Printf("  %s\n", contextBar(a.currentContextTokens(), window))
+				if todoLine := a.todoProgressLine(); todoLine != "" {
+					fmt.Printf("  %s\n", todoLine)
+				}
 			}
 
-			// Handle slash commands. Anything starting with "/" is a command —
-			// an unknown one must NOT be sent to the AI as a prompt (that was a
-			// bug: /typo got answered by the model). Show a hint instead.
-			if strings.HasPrefix(input, "/") {
-				if a.handleSlashCommand(input) {
+			// Inner loop: handle slash commands and empty input without calling
+			// the API. Only break when the user sends a real message or exits.
+			shouldExit := false
+			for {
+				// /exit (via the slash-command picker) sets this flag.
+				if a.ShouldExit {
+					shouldExit = true
+					break
+				}
+
+				input := inputFn()
+
+				// Empty input = just pressed Enter, keep waiting
+				if input == "" {
 					continue
 				}
-				fmt.Println("  " + ansiYellow + "unknown command: " + input + ansiReset)
-				fmt.Println("  " + ansiDarkGray + "type /help for the command list" + ansiReset)
-				continue
-			}
 
-			if input == "exit" || input == "done" || input == "quit" {
+				// Handle slash commands. Anything starting with "/" is a command —
+				// an unknown one must NOT be sent to the AI as a prompt (that was
+				// a bug: /typo got answered by the model). Show a hint instead.
+				if strings.HasPrefix(input, "/") {
+					if a.handleSlashCommand(input) {
+						continue
+					}
+					fmt.Println("  " + ansiYellow + "unknown command: " + input + ansiReset)
+					fmt.Println("  " + ansiDarkGray + "type /help for the command list" + ansiReset)
+					continue
+				}
+
+				if input == "exit" || input == "done" || input == "quit" {
+					shouldExit = true
+					break
+				}
+				a.Messages = append(a.Messages, Message{Role: "user", Content: input})
+				a.ToolErrorCount = 0 // user is steering in a new direction — reset retries
 				break
 			}
-			a.Messages = append(a.Messages, Message{Role: "user", Content: input})
+			if shouldExit {
+				break
+			}
 			continue
 		}
 
@@ -236,24 +289,43 @@ func (a *Agent) Run(inputFn func() string) error {
 		}
 		a.Messages = append(a.Messages, Message{Role: "user", Content: results})
 
-		// Self-repair: if tools failed, inject a nudge for the AI to fix it
+		// Self-repair: if tools failed, inject a nudge for the AI to fix it.
+		// Track consecutive failure rounds so we stop nudging after 3 attempts
+		// (matching the "max 3 retries" advertised in the system prompt).
 		if hasError {
-			a.Messages = append(a.Messages, Message{
-				Role:    "user",
-				Content: "[System] One or more tool calls failed. Please analyze the error above and fix it. If a build/test failed, read the error message carefully and correct your code. You have up to 3 attempts.",
-			})
+			a.ToolErrorCount++
+			if a.ToolErrorCount <= 3 {
+				a.Messages = append(a.Messages, Message{
+					Role:    "user",
+					Content: fmt.Sprintf("[System] One or more tool calls failed (attempt %d/3). Please analyze the error above and fix it. If a build/test failed, read the error message carefully and correct your code.", a.ToolErrorCount),
+				})
+			} else {
+				// Exhausted retries — pass the failure back to the user and
+				// stop the agent loop so it doesn't spin forever.
+				fmt.Println()
+				fmt.Printf("  " + ansiRed + "✗ tool retries exhausted — check the errors above" + ansiReset + "\n")
+				break
+			}
+		} else {
+			a.ToolErrorCount = 0
 		}
 	}
 
-	// Show session stats and end animation
-	fmt.Println()
-	fmt.Println(a.Stats.Display())
-	AnimateSessionEnd()
+	// Save cumulative stats across sessions
+	a.saveCumulativeStats()
+
+	// Show session stats and end animation (skipped in TUI mode — the TUI
+	// draws its own exit UI).
+	if !tuiMode {
+		fmt.Println()
+		fmt.Println(a.Stats.Display())
+		AnimateSessionEnd()
+	}
 
 	// Auto-save the conversation so it can be resumed, Claude-Code style.
 	// Skip saving if the session was empty (just opened and exited).
 	if len(a.Messages) > 1 {
-		if id, err := SaveSession(a); err == nil {
+		if id, err := SaveSession(a); err == nil && !tuiMode {
 			fmt.Println()
 			fmt.Printf("  "+ansiDarkGray+"✓ session saved — resume with:"+ansiReset+" boltcode --resume %s\n", id)
 		}
@@ -309,6 +381,7 @@ func (a *Agent) autoCompact() {
 	a.Stats.LastInput = estimateTokens(a.Messages)
 	fmt.Printf("  "+ansiGreen+"✓ compacted — context now ~%s tokens"+ansiReset+"\n",
 		formatTokens(a.Stats.LastInput))
+	fmt.Print("  \033[38;5;75m❯\033[0m\n")
 }
 
 // processResponse parses the API response content blocks and extracts tool calls.
@@ -368,6 +441,8 @@ func (a *Agent) printToolUse(tc ToolCall) {
 		printToolHeader("📋", "Plan", "update task list")
 	case "multi_edit":
 		printToolHeader("✏️", "MultiEdit", input["path"])
+	case "glob":
+		printToolHeader("🔎", "Glob", truncate(input["pattern"], 40))
 	}
 }
 
@@ -398,6 +473,13 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 		if more > 0 {
 			fmt.Printf("  "+ansiDarkGray+"│"+ansiReset+" "+ansiDim+"… %d more lines"+ansiReset+"\n", more)
 		}
+	case "edit_file", "multi_edit":
+		// Show a compact diff preview if the tool populated one.
+		if result.Diff != "" {
+			for _, l := range strings.Split(result.Diff, "\n") {
+				fmt.Println(l)
+			}
+		}
 	}
 
 	// Build a descriptive footer with stats where meaningful.
@@ -427,13 +509,9 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 	printToolFooter(true, footer)
 }
 
+// truncate shortens s to max runes (newline-flattened) with a "…" indicator.
+// It delegates to the shared truncateStr so the rune-slicing logic lives in one
+// place; the newline replacement is specific to inline display contexts.
 func truncate(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	// Truncate by rune count so multi-byte characters (CJK, emoji) aren't
-	// split mid-glyph, which would leave garbled output.
-	r := []rune(s)
-	if len(r) > max {
-		return string(r[:max]) + "..."
-	}
-	return s
+	return truncateStr(strings.ReplaceAll(s, "\n", " "), max, "...")
 }

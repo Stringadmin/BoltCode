@@ -54,17 +54,21 @@ type Session struct {
 	rl        *readline.Instance
 	lastCtrlC time.Time
 	mu        sync.Mutex
+	sigCh     chan os.Signal // shared so launchAgent can temporarily grab signals
 }
 
 // readLine reads one line of user input using readline (with history + editing).
-// Returns empty string on EOF. Returns "exit" on Ctrl+C (interrupt).
+// Returns "exit" on Ctrl-C (ErrInterrupt), Ctrl-D (io.EOF), or when the
+// readline instance is closed (ErrClosed) — all of which mean "stop reading".
+// Returning "exit" (rather than "") on EOF is important: the main loop treats
+// "" as "empty input, re-prompt", so an EOF previously caused an infinite
+// re-prompt loop. Callers that need to distinguish a real "exit" command from
+// an EOF/Ctrl-C can check the source, but the safe action in all three cases is
+// to stop.
 func (s *Session) readLine() string {
 	line, err := s.rl.Readline()
 	if err != nil {
-		if err == readline.ErrInterrupt {
-			return "exit"
-		}
-		return ""
+		return "exit"
 	}
 	return strings.TrimSpace(line)
 }
@@ -127,12 +131,17 @@ func Run(version string) error {
 	}
 	defer rl.Close()
 
-	s := &Session{App: app, rl: rl}
-
 	// Intercept Ctrl+C for double-press exit protection
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
+	s := &Session{App: app, rl: rl, sigCh: sigCh}
 	go s.handleInterrupt(sigCh)
+	// Stop signal delivery when the session ends so the goroutine doesn't
+	// touch readline after Run returns. (We don't close sigCh: the signal
+	// package may still attempt a non-blocking send, and closing would risk a
+	// send-on-closed panic. The goroutine becomes idle and is collected with
+	// the process.)
+	defer signal.Stop(sigCh)
 
 	s.showStatus()
 	s.loop()
@@ -141,6 +150,12 @@ func Run(version string) error {
 
 // handleInterrupt implements the double Ctrl+C exit protection.
 // First press: show a warning. Second press within 2 seconds: exit.
+//
+// On the second press we close the readline instance instead of calling
+// os.Exit. Closing readline unblocks any pending Readline() call in the loop,
+// which then returns "exit" and lets Run return normally — so deferred cleanup
+// (rl.Close, history flush) actually runs. The previous os.Exit(0) skipped
+// those defers and could leave the terminal in raw mode.
 func (s *Session) handleInterrupt(sigCh <-chan os.Signal) {
 	for range sigCh {
 		s.mu.Lock()
@@ -149,9 +164,14 @@ func (s *Session) handleInterrupt(sigCh <-chan os.Signal) {
 		s.mu.Unlock()
 
 		if elapsed < 2*time.Second {
-			fmt.Println()
-			fmt.Println(infoStyle.Render("  bye"))
-			os.Exit(0)
+			// Close readline so a pending Readline() in the loop returns and
+			// the loop exits normally — letting deferred cleanup (rl.Close,
+			// history flush) actually run. The previous os.Exit(0) skipped
+			// those defers and could leave the terminal in raw mode. We don't
+			// print "bye" here; the loop prints it when readLine returns
+			// "exit" (which it does once the instance is closed).
+			s.rl.Close()
+			return
 		}
 		fmt.Println()
 		fmt.Println(infoStyle.Render("  press Ctrl+C again to exit (within 2s)"))

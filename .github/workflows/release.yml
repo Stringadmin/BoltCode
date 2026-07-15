@@ -28,7 +28,9 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          # Pinned to a stable minor instead of `latest` so a breaking
+          # goreleaser change can't silently break releases.
+          version: v2.4.8
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

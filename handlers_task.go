@@ -102,8 +102,19 @@ func runTask(wd string, args []string) error {
 		fmt.Printf("task %s claimed by %s\n", t.ID, t.Assignee)
 		return nil
 
+	case "abandon":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: boltcode task abandon <task-id>")
+		}
+		t, err := app.TaskAbandon(args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("task %s abandoned\n", t.ID)
+		return nil
+
 	default:
-		return fmt.Errorf("unknown task subcommand %q", args[0])
+		return fmt.Errorf("unknown task subcommand %q — try: new, ls, claim, abandon", args[0])
 	}
 }
 

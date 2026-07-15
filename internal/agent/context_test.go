@@ -23,6 +23,25 @@ func TestModelContextWindow(t *testing.T) {
 	}
 }
 
+func TestModelContextWindowEnvOverride(t *testing.T) {
+	// BOLTCODE_CONTEXT_WINDOW takes precedence over the built-in table, so a
+	// user with an unlisted/custom model isn't stuck with the 128k default.
+	t.Setenv("BOLTCODE_CONTEXT_WINDOW", "999000")
+	if w := modelContextWindow("some-custom-model"); w != 999000 {
+		t.Errorf("env override = %d, want 999000", w)
+	}
+	// Override applies even to known models.
+	if w := modelContextWindow("claude-sonnet-4-20250514"); w != 999000 {
+		t.Errorf("env override for known model = %d, want 999000", w)
+	}
+	// A garbage value falls through to the table (not 0, which would break
+	// compaction math).
+	t.Setenv("BOLTCODE_CONTEXT_WINDOW", "not-a-number")
+	if w := modelContextWindow("claude-sonnet-4-20250514"); w < 100_000 {
+		t.Errorf("garbage env should fall through to table, got %d", w)
+	}
+}
+
 func TestShouldCompact(t *testing.T) {
 	window := 100_000
 	if shouldCompact(50_000, window) {
@@ -64,9 +83,13 @@ func TestEstimateTokens(t *testing.T) {
 func TestTodoWrite(t *testing.T) {
 	a := &Agent{}
 	in := `{"todos":[{"content":"step one","status":"completed"},{"content":"step two","status":"in_progress"},{"content":"step three","status":"pending"}]}`
-	res := a.toolTodoWrite([]byte(in))
+	res := a.toolTodoWrite("tu_1", []byte(in))
 	if res.IsError {
 		t.Fatalf("todo_write failed: %s", res.Content)
+	}
+	// The tool_use_id must be echoed back so the API can match the result.
+	if res.ToolUseID != "tu_1" {
+		t.Errorf("tool_use_id = %q, want %q", res.ToolUseID, "tu_1")
 	}
 	if len(a.TodoList) != 3 {
 		t.Fatalf("todo list len = %d", len(a.TodoList))
@@ -84,7 +107,7 @@ func TestTodoWrite(t *testing.T) {
 func TestTodoWriteBadStatusDefaults(t *testing.T) {
 	a := &Agent{}
 	in := `{"todos":[{"content":"x","status":"bogus"}]}`
-	a.toolTodoWrite([]byte(in))
+	a.toolTodoWrite("tu_2", []byte(in))
 	if a.TodoList[0].Status != "pending" {
 		t.Errorf("bad status should default to pending, got %q", a.TodoList[0].Status)
 	}
@@ -97,9 +120,12 @@ func TestMultiEditAppliesAll(t *testing.T) {
 	os.WriteFile(path, []byte("foo\nbar\nbaz\n"), 0o644)
 
 	in := `{"path":"f.txt","edits":[{"old_string":"foo","new_string":"FOO"},{"old_string":"baz","new_string":"BAZ"}]}`
-	res := a.toolMultiEdit([]byte(in))
+	res := a.toolMultiEdit("me_1", []byte(in))
 	if res.IsError {
 		t.Fatalf("multi_edit failed: %s", res.Content)
+	}
+	if res.ToolUseID != "me_1" {
+		t.Errorf("tool_use_id = %q, want %q", res.ToolUseID, "me_1")
 	}
 	data, _ := os.ReadFile(path)
 	if string(data) != "FOO\nbar\nBAZ\n" {
@@ -116,9 +142,12 @@ func TestMultiEditAbortsOnBadEdit(t *testing.T) {
 
 	// Second edit's old_string doesn't exist — whole op must abort, file untouched.
 	in := `{"path":"f.txt","edits":[{"old_string":"foo","new_string":"FOO"},{"old_string":"nope","new_string":"X"}]}`
-	res := a.toolMultiEdit([]byte(in))
+	res := a.toolMultiEdit("me_2", []byte(in))
 	if !res.IsError {
 		t.Fatal("expected abort error")
+	}
+	if res.ToolUseID != "me_2" {
+		t.Errorf("tool_use_id = %q, want %q", res.ToolUseID, "me_2")
 	}
 	data, _ := os.ReadFile(path)
 	if string(data) != original {
@@ -133,8 +162,11 @@ func TestMultiEditRejectsAmbiguous(t *testing.T) {
 	os.WriteFile(path, []byte("dup\ndup\n"), 0o644)
 
 	in := `{"path":"f.txt","edits":[{"old_string":"dup","new_string":"X"}]}`
-	res := a.toolMultiEdit([]byte(in))
+	res := a.toolMultiEdit("me_3", []byte(in))
 	if !res.IsError {
 		t.Fatal("expected ambiguous-match error")
+	}
+	if res.ToolUseID != "me_3" {
+		t.Errorf("tool_use_id = %q, want %q", res.ToolUseID, "me_3")
 	}
 }

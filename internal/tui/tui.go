@@ -6,6 +6,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -24,16 +25,29 @@ const (
 
 // Model is the Bubble Tea model for the review TUI.
 type Model struct {
-	app       *command.App
-	proposals []*model.Proposal
-	cursor    int
-	current   view
-	diff      string
-	width     int
-	height    int
-	scroll    int
-	message   string
-	quitting  bool
+	app             *command.App
+	proposals       []*model.Proposal
+	cursor          int
+	current         view
+	diff            string
+	width           int
+	height          int
+	scroll          int
+	message         string
+	quitting        bool
+	author          string // git user.name, cached at startup for review attribution
+	confirmingMerge bool   // true after first "m" — second "m" confirms the (irreversible) merge
+}
+
+// tickMsg is emitted periodically by tickCmd so the TUI can reload pending
+// proposals without the user restarting — a teammate's submission appears
+// within a few seconds.
+type tickMsg time.Time
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
 
 // New creates the TUI model, pre-loading pending proposals.
@@ -42,7 +56,9 @@ func New(app *command.App) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	return Model{app: app, proposals: pending, width: 80, height: 24}, nil
+	// Cache the reviewer identity once (WhoAmI shells out to git) so each
+	// approve/reject keypress doesn't spawn a git process.
+	return Model{app: app, proposals: pending, width: 80, height: 24, author: app.WhoAmI()}, nil
 }
 
 // Styles
@@ -68,11 +84,24 @@ var (
 )
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	// Start the periodic-refresh loop so new proposals from teammates appear
+	// without restarting the TUI.
+	return tickCmd()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tickMsg:
+		// Reload pending proposals. Skip while a merge confirmation is pending
+		// so the cursor doesn't jump mid-confirm. Approve/reject already
+		// mutated the store, so reloaded state is consistent.
+		if !m.confirmingMerge {
+			if pending, err := m.app.ListPending(); err == nil {
+				m.proposals = pending
+			}
+		}
+		return m, tickCmd() // schedule the next refresh
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -93,7 +122,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+	// A pending merge confirmation is cancelled by any key other than a second
+	// "m" — this prevents an accidental single keypress from merging.
+	if m.confirmingMerge && key != "m" {
+		m.confirmingMerge = false
+		m.message = ""
+	}
+	switch key {
 	case "q", "ctrl+c":
 		m.quitting = true
 		return m, tea.Quit
@@ -120,44 +156,53 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		if len(m.proposals) > 0 {
 			p := m.proposals[m.cursor]
-			if _, err := m.app.Approve(p.ID, "human"); err != nil {
+			if _, err := m.app.Approve(p.ID, m.author); err != nil {
 				m.message = "error: " + err.Error()
 			} else {
 				m.message = fmt.Sprintf("✓ approved %s", p.ID)
-				m.proposals = removeAt(m.proposals, m.cursor)
-				if m.cursor >= len(m.proposals) && m.cursor > 0 {
-					m.cursor--
-				}
+				m.removeCurrent()
 			}
 		}
 	case "m":
 		if len(m.proposals) > 0 {
-			p := m.proposals[m.cursor]
-			if _, err := m.app.ApproveAndMerge(p.ID, "human"); err != nil {
-				m.message = "error: " + err.Error()
-			} else {
-				m.message = fmt.Sprintf("✓ merged %s", p.ID)
-				m.proposals = removeAt(m.proposals, m.cursor)
-				if m.cursor >= len(m.proposals) && m.cursor > 0 {
-					m.cursor--
+			if m.confirmingMerge {
+				// Second press — confirm the irreversible merge.
+				m.confirmingMerge = false
+				p := m.proposals[m.cursor]
+				if _, err := m.app.ApproveAndMerge(p.ID, m.author); err != nil {
+					m.message = "error: " + err.Error()
+				} else {
+					m.message = fmt.Sprintf("✓ merged %s", p.ID)
+					m.removeCurrent()
 				}
+			} else {
+				// First press — ask for confirmation.
+				m.confirmingMerge = true
+				m.message = fmt.Sprintf("press m again to merge %s (irreversible), or any other key to cancel", m.proposals[m.cursor].ID)
 			}
 		}
 	case "r":
 		if len(m.proposals) > 0 {
 			p := m.proposals[m.cursor]
-			if err := m.app.Reject(p.ID, "human", "rejected via TUI"); err != nil {
+			if err := m.app.Reject(p.ID, m.author, "rejected via TUI"); err != nil {
 				m.message = "error: " + err.Error()
 			} else {
 				m.message = fmt.Sprintf("✗ rejected %s", p.ID)
-				m.proposals = removeAt(m.proposals, m.cursor)
-				if m.cursor >= len(m.proposals) && m.cursor > 0 {
-					m.cursor--
-				}
+				m.removeCurrent()
 			}
 		}
 	}
 	return m, nil
+}
+
+// removeCurrent drops the proposal at the cursor and clamps the cursor so it
+// never points past the end of the (now shorter) list. Shared by approve,
+// merge, and reject.
+func (m *Model) removeCurrent() {
+	m.proposals = removeAt(m.proposals, m.cursor)
+	if m.cursor >= len(m.proposals) && m.cursor > 0 {
+		m.cursor--
+	}
 }
 
 func (m Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -170,6 +215,12 @@ func (m Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "down", "j":
 		m.scroll++
+	case "a", "m", "r":
+		// The diff view advertises a/m/r in its help line, so they must work
+		// here too: switch back to the list and delegate, reusing the exact
+		// approve/merge/reject logic (including the two-press merge confirm).
+		m.current = viewList
+		return m.updateList(msg)
 	case "ctrl+c":
 		m.quitting = true
 		return m, tea.Quit
@@ -214,12 +265,23 @@ func (m Model) viewList() string {
 	if m.message != "" {
 		b.WriteString(statusStyle.Render("  "+m.message) + "\n\n")
 	}
-	b.WriteString(helpStyle.Render("  ↑/↓ navigate  enter/d diff  a approve  m merge  r reject  q quit"))
+	help := "  ↑/↓ navigate  enter/d diff  a approve  m merge (press 2×)  r reject  q quit"
+	if m.confirmingMerge {
+		help = "  press m again to confirm merge — any other key cancels"
+	}
+	b.WriteString(helpStyle.Render(help))
 	return b.String()
 }
 
 func (m Model) viewDiff() string {
 	var b strings.Builder
+	// Defensive: if the list emptied while we were viewing a diff (e.g. a
+	// teammate approved the proposal and a refresh removed it), fall back to
+	// the list view instead of indexing an empty slice.
+	if len(m.proposals) == 0 || m.cursor >= len(m.proposals) {
+		m.current = viewList
+		return m.viewList()
+	}
 	p := m.proposals[m.cursor]
 	b.WriteString(titleStyle.Render(fmt.Sprintf("  DIFF — %s (%s)", p.ID, p.Summary)) + "\n\n")
 
@@ -248,7 +310,7 @@ func (m Model) viewDiff() string {
 		}
 	}
 
-	b.WriteString("\n" + helpStyle.Render("  ↑/↓ scroll  q/esc back  a approve  m merge  r reject"))
+	b.WriteString("\n" + helpStyle.Render("  ↑/↓ scroll  q/esc back  a approve  m merge (press 2×)  r reject"))
 	return b.String()
 }
 

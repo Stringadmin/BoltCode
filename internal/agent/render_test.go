@@ -148,7 +148,7 @@ func TestStatRowDoesNotPanicAndAligns(t *testing.T) {
 
 func TestStatsDisplayContainsAllMetrics(t *testing.T) {
 	s := NewStats()
-	s.Add(100, 50)
+	s.Add("claude-sonnet-4-20250514", 100, 50)
 	s.AddToolCall()
 	s.AddToolCall()
 	out := s.Display()
@@ -156,5 +156,8 @@ func TestStatsDisplayContainsAllMetrics(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("Display missing %q in: %q", want, out)
 		}
+	}
+	if !strings.Contains(out, "cost") {
+		t.Errorf("Display should include cost for known model, got: %q", out)
 	}
 }

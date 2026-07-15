@@ -114,3 +114,93 @@ func TestToolEditFileNotFound(t *testing.T) {
 		t.Fatalf("expected not-found error, got success")
 	}
 }
+
+// --- symlink escape protection (P0) ---
+// A symlink inside the worktree pointing outside must not let a tool escape
+// the sandbox. Before the fix, safeJoin only did a string-based ".." check and
+// happily followed a symlink to /etc (or a sibling temp dir).
+
+func TestSafeJoinRejectsSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows; tested on Unix")
+	}
+	a := newAgentInTemp(t)
+
+	// outsideTarget lives outside the workdir (sibling temp dir).
+	outsideTarget := t.TempDir()
+	secret := filepath.Join(outsideTarget, "secret.txt")
+	writeFile(t, secret, "top secret")
+
+	// Plant a symlink inside the worktree pointing at the outside target.
+	link := filepath.Join(a.Workdir, "evil")
+	if err := os.Symlink(outsideTarget, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// Reading through the symlink must be refused.
+	if _, isErr := a.toolReadFile("evil/secret.txt", "", ""); !isErr {
+		t.Fatal("toolReadFile must reject symlink that escapes workdir")
+	}
+	// Writing through the symlink must also be refused.
+	if _, isErr := a.toolWriteFile("evil/leaked.txt", "exfiltrated"); !isErr {
+		t.Fatal("toolWriteFile must reject symlink that escapes workdir")
+	}
+	// And the secret must be untouched.
+	got, _ := os.ReadFile(secret)
+	if string(got) != "top secret" {
+		t.Fatalf("secret file modified via symlink escape: %q", string(got))
+	}
+}
+
+func TestSafeJoinAllowsSymlinkInsideWorkdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows; tested on Unix")
+	}
+	a := newAgentInTemp(t)
+	// A symlink that points to another location INSIDE the workdir is fine.
+	writeFile(t, filepath.Join(a.Workdir, "real.txt"), "data")
+	if err := os.Symlink("real.txt", filepath.Join(a.Workdir, "alias")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, isErr := a.toolReadFile("alias", "", ""); isErr {
+		t.Fatal("toolReadFile should allow an intra-workdir symlink")
+	}
+}
+
+// --- destructive-command denylist (P2) ---
+// Even under AutoAllow, catastrophic commands must be flagged for confirmation.
+
+func TestIsDestructive(t *testing.T) {
+	bad := []string{
+		"rm -rf /",
+		"rm -rf /home",
+		"rm -rf ~",
+		"rm -rf $HOME",
+		"sudo rm -rf /var",
+		"git push --force origin main",
+		"git push -f origin master",
+		":(){ :|:& };:",
+		"dd if=/dev/zero of=/dev/sda",
+		"mkfs.ext4 /dev/sda1",
+		"chmod -R 777 /",
+	}
+	for _, cmd := range bad {
+		if !isDestructive(cmd) {
+			t.Errorf("isDestructive(%q) = false, want true", cmd)
+		}
+	}
+	good := []string{
+		"rm -rf build/",                       // scoped to a dir, not root/home
+		"git push origin main",                // non-force push
+		"git push --force origin feature/xyz", // force-push to a feature branch
+		"npm test",
+		"go build ./...",
+		"rm file.txt",
+		"chmod 644 config.yml",
+	}
+	for _, cmd := range good {
+		if isDestructive(cmd) {
+			t.Errorf("isDestructive(%q) = true, want false (false positive)", cmd)
+		}
+	}
+}

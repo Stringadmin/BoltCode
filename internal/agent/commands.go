@@ -33,6 +33,7 @@ var SlashCommands = []SlashCommand{
 	{"/clear", "clear conversation history"},
 	{"/compact", "summarize old messages (LLM)"},
 	{"/context", "show context-usage bar"},
+	{"/restrict", "re-enable command confirmation (undo auto-allow)"},
 	{"/triage", "review codebase, prioritized items"},
 	{"/sessions", "list saved conversations"},
 	{"/exit", "end session"},
@@ -42,6 +43,13 @@ var SlashCommands = []SlashCommand{
 // Returns true if the command was handled (loop should continue).
 func (a *Agent) handleSlashCommand(input string) bool {
 	switch {
+	case input == "/":
+		return a.slashCommandPicker()
+
+	case input == "/exit":
+		a.ShouldExit = true
+		return true
+
 	case input == "/help" || input == "/?":
 		fmt.Println("\n" + ansiDarkGray + "  ─────────────────────────────────")
 		fmt.Println("  Slash commands:")
@@ -57,6 +65,7 @@ func (a *Agent) handleSlashCommand(input string) bool {
 		fmt.Println("    /clear       clear conversation history")
 		fmt.Println("    /compact     summarize old messages (LLM) to free context")
 		fmt.Println("    /context     show context-usage bar vs model window")
+		fmt.Println("    /restrict    re-enable command confirmation (undo auto-allow)")
 		fmt.Println("    /triage [worktree|repo]  review codebase, give prioritized action items")
 		fmt.Println("    /sessions    list saved conversations (resume with boltcode --resume <id>)")
 		fmt.Println("    done/exit    end session")
@@ -72,8 +81,7 @@ func (a *Agent) handleSlashCommand(input string) bool {
 		return true
 
 	case input == "/model":
-		fmt.Printf("\n  "+ansiGray+"current model: %s"+ansiReset+"\n", a.Config.Model)
-		return true
+		return a.modelPicker()
 
 	case len(input) > 7 && input[:7] == "/model ":
 		newModel := input[7:]
@@ -105,6 +113,15 @@ func (a *Agent) handleSlashCommand(input string) bool {
 		fmt.Println("\n  " + ansiGreen + "✓ conversation cleared" + ansiReset)
 		return true
 
+	case input == "/restrict":
+		// Undo a prior "a/allow" so every command is confirmed again. Without
+		// this, AutoAllow was permanent for the session — a risky state to be
+		// stuck in. (Destructive commands are still confirmed even under
+		// AutoAllow, but /restrict restores full confirmation for everything.)
+		a.AutoAllow = false
+		fmt.Println("\n  " + ansiGreen + "✓ command confirmation re-enabled" + ansiReset)
+		return true
+
 	case input == "/compact":
 		// LLM-summarized compaction: older history becomes a summary, recent
 		// messages kept verbatim. Falls back to hard truncation on error.
@@ -129,6 +146,18 @@ func (a *Agent) handleSlashCommand(input string) bool {
 		return a.runTriage("repo")
 	case input == "/sessions":
 		return a.showSessions()
+	case len(input) > 17 && input[:17] == "/sessions delete ":
+		id := strings.TrimSpace(input[17:])
+		if !validSessionID(id) {
+			fmt.Println("\n  " + ansiRed + "invalid session id: " + id + ansiReset)
+			return true
+		}
+		if err := DeleteSession(id); err != nil {
+			fmt.Println("\n  " + ansiRed + "✗ " + err.Error() + ansiReset)
+			return true
+		}
+		fmt.Println("\n  " + ansiGreen + "✓ session " + id + " deleted" + ansiReset)
+		return true
 	case input == "/context":
 		return a.showContext()
 	}
@@ -167,7 +196,7 @@ func (a *Agent) showSessions() bool {
 	fmt.Println("  " + ansiBold + "recent sessions:" + ansiReset)
 	for i, s := range sessions {
 		if i >= 10 {
-			fmt.Printf("  " + ansiDarkGray + "... and %d more\n"+ansiReset, len(sessions)-10)
+			fmt.Printf("  "+ansiDarkGray+"... and %d more\n"+ansiReset, len(sessions)-10)
 			break
 		}
 		cur := "  "
@@ -275,6 +304,106 @@ func (a *Agent) profilePicker() bool {
 	}
 }
 
+// slashCommandPicker shows an interactive numbered menu of all slash commands.
+// The user selects by number or types the command name directly. Triggered when
+// the user types "/" alone.
+func (a *Agent) slashCommandPicker() bool {
+	menu := "\n  " + ansiBold + "slash commands:" + ansiReset + "\n"
+	for i, cmd := range SlashCommands {
+		menu += fmt.Sprintf("  %s%d)%s %-20s %s%s%s\n",
+			ansiDarkGray, i+1, ansiReset,
+			cmd.Name,
+			ansiGray, cmd.Desc, ansiReset)
+	}
+	menu += fmt.Sprintf("\n  %s[1-%d] select  [q] quit > %s",
+		ansiDarkGray, len(SlashCommands), ansiReset)
+	choice := strings.TrimSpace(a.readWith(menu))
+	if choice == "" || choice == "q" || choice == "quit" {
+		return true
+	}
+	// Numeric selection
+	if n, err := parseNumber(choice); err == nil && n >= 1 && n <= len(SlashCommands) {
+		selected := SlashCommands[n-1].Name
+		return a.handleSlashCommand(selected)
+	}
+	// Direct command name
+	if strings.HasPrefix(choice, "/") {
+		return a.handleSlashCommand(choice)
+	}
+	fmt.Println("  " + ansiRed + "invalid choice" + ansiReset)
+	return true
+}
+
+// modelPicker shows an interactive numbered menu of available models for the
+// current provider. The user selects by number. Triggered when the user types
+// "/model" without arguments.
+func (a *Agent) modelPicker() bool {
+	models := modelsForProvider(a.Config.Provider)
+	if len(models) == 0 {
+		// Unknown provider — fall back to free-text input.
+		fmt.Printf("\n  "+ansiGray+"current model: %s"+ansiReset+"\n", a.Config.Model)
+		fmt.Print("  " + ansiDarkGray + "enter model id (q=cancel) > " + ansiReset)
+		input := strings.TrimSpace(a.readWith(""))
+		if input == "" || input == "q" || input == "quit" {
+			return true
+		}
+		a.Config.Model = input
+		if err := SetCurrentModel(input); err == nil {
+			fmt.Printf("  "+ansiGreen+"✓ switched to: %s"+ansiReset+"\n", input)
+		}
+		return true
+	}
+
+	menu := "\n  " + ansiBold + "models" + ansiReset + ansiGray + " (" + a.Config.Provider + ")" + ansiReset + ":\n"
+	for i, m := range models {
+		marker := "  "
+		if m.ID == a.Config.Model {
+			marker = ansiGreen + "▶ " + ansiReset
+		}
+		label := m.Label
+		if label == "" {
+			label = m.ID
+		}
+		menu += fmt.Sprintf("  %s%d) %-30s %s%s%s\n",
+			marker, i+1, m.ID, ansiGray, label, ansiReset)
+	}
+	menu += fmt.Sprintf("\n  %s[1-%d] switch  [q] quit > %s",
+		ansiDarkGray, len(models), ansiReset)
+
+	choice := strings.TrimSpace(a.readWith(menu))
+	if choice == "" || choice == "q" || choice == "quit" {
+		return true
+	}
+	n, err := parseNumber(choice)
+	if err != nil || n < 1 || n > len(models) {
+		fmt.Println("  " + ansiRed + "invalid choice" + ansiReset)
+		return true
+	}
+	selected := models[n-1].ID
+	a.Config.Model = selected
+	if err := SetCurrentModel(selected); err != nil {
+		fmt.Printf("  "+ansiYellow+"⚠ saved for this session only: %v"+ansiReset+"\n", err)
+	} else {
+		fmt.Printf("  "+ansiGreen+"✓ switched to: %s"+ansiReset+"\n", selected)
+	}
+	return true
+}
+
+// parseNumber parses a positive integer from a string.
+func parseNumber(s string) (int, error) {
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("not a number")
+		}
+		n = n*10 + int(r-'0')
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("zero")
+	}
+	return n, nil
+}
+
 // readWith prints prompt (via PromptFn if set, else fmt.Print+InputFn) and
 // reads one line. Centralizes the readline-sync handling.
 func (a *Agent) readWith(prompt string) string {
@@ -306,9 +435,9 @@ func (a *Agent) createNewProfile() bool {
 		fmt.Println("  " + ansiRed + "API Key required — cancelled" + ansiReset)
 		return false
 	}
-	model := a.readWith("  model [claude-sonnet-4-20250514]: ")
+	model := a.readWith("  model [" + DefaultModel + "]: ")
 	if model == "" {
-		model = "claude-sonnet-4-20250514"
+		model = DefaultModel
 	}
 	baseURL := strings.TrimSpace(a.readWith("  base URL (blank=default): "))
 
@@ -347,12 +476,12 @@ func (a *Agent) showProfiles() bool {
 func (a *Agent) switchProfile(name string) bool {
 	p, err := SwitchProfile(name)
 	if err != nil {
-		fmt.Printf("\n  " + ansiRed + "✗ %v" + ansiReset + "\n", err)
+		fmt.Printf("\n  "+ansiRed+"✗ %v"+ansiReset+"\n", err)
 		return true
 	}
 	a.Config = p.ToConfig()
-	fmt.Printf("\n  " + ansiGreen + "✓ active profile: %s" + ansiReset + "\n", p.Name)
-	fmt.Printf("  " + ansiGray + "provider: %s, model: %s" + ansiReset + "\n", p.Provider, p.Model)
+	fmt.Printf("\n  "+ansiGreen+"✓ active profile: %s"+ansiReset+"\n", p.Name)
+	fmt.Printf("  "+ansiGray+"provider: %s, model: %s"+ansiReset+"\n", p.Provider, p.Model)
 	return true
 }
 

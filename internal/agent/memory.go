@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Stringadmin/BoltCode/internal/fio"
 )
 
 // ProjectMemory persists across sessions. Stored at .boltcode/local/memory.json.
@@ -24,13 +26,25 @@ type ProjectMemory struct {
 	// Past decisions (what was agreed on)
 	Decisions []Decision `json:"decisions,omitempty"`
 
+	// Cumulative usage across sessions
+	CumulativeStats *CumulativeUsage `json:"cumulative_stats,omitempty"`
+
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// CumulativeUsage tracks total token usage across all sessions in this project.
+// Displayed in the session-end panel so users see lifetime cost.
+type CumulativeUsage struct {
+	TotalInputTokens  int     `json:"total_input_tokens"`
+	TotalOutputTokens int     `json:"total_output_tokens"`
+	TotalCost         float64 `json:"total_cost"`
+	SessionCount      int     `json:"session_count"`
+}
+
 type Decision struct {
-	Topic   string `json:"topic"`
-	Choice  string `json:"choice"`
-	Date    string `json:"date"`
+	Topic  string `json:"topic"`
+	Choice string `json:"choice"`
+	Date   string `json:"date"`
 }
 
 func memoryPath(workdir string) string {
@@ -67,16 +81,19 @@ func (a *Agent) LoadMemory() *ProjectMemory {
 	return &mem
 }
 
-// SaveMemory persists memory to disk.
-func (a *Agent) SaveMemory(mem *ProjectMemory) {
+// SaveMemory persists memory to disk. It now returns an error (previously the
+// write failure was silently swallowed) and writes atomically (temp + rename)
+// so a crash or signal mid-write can't leave a corrupt memory.json. Memory is
+// per-worktree and the agent updates it from the single-threaded tool loop, so
+// no cross-process lock is needed — atomicity is enough.
+func (a *Agent) SaveMemory(mem *ProjectMemory) error {
 	mem.UpdatedAt = time.Now()
 	path := memoryPath(a.Workdir)
-	os.MkdirAll(filepath.Dir(path), 0o755)
 	data, err := json.MarshalIndent(mem, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
-	os.WriteFile(path, data, 0o644)
+	return fio.WriteFileAtomic(path, data, 0o600)
 }
 
 // MemoryContext returns a formatted string of the memory for injection into prompts.
@@ -121,4 +138,27 @@ func (mem *ProjectMemory) Context() string {
 		return ""
 	}
 	return strings.Join(parts, "\n")
+}
+
+// saveCumulativeStats loads the persistent memory, adds the current session's
+// usage to the cumulative totals, and writes it back. Called at the end of
+// Run() so the user sees lifetime stats across sessions.
+func (a *Agent) saveCumulativeStats() {
+	if a.Stats == nil {
+		return
+	}
+	mem := a.LoadMemory()
+	if mem.CumulativeStats == nil {
+		mem.CumulativeStats = &CumulativeUsage{}
+	}
+	cu := mem.CumulativeStats
+	cu.TotalInputTokens += a.Stats.InputTokens
+	cu.TotalOutputTokens += a.Stats.OutputTokens
+	cu.TotalCost += a.Stats.TotalCost
+	cu.SessionCount++
+	// Attach cumulative data to Stats so Display() can show it.
+	a.Stats.SetCumulative(cu)
+	// Best-effort save — don't let a write failure shadow the session-end
+	// animation.
+	_ = a.SaveMemory(mem)
 }

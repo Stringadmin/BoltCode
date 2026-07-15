@@ -3,12 +3,9 @@ package shell
 import (
 	"fmt"
 	"strings"
-	"syscall"
 
 	"github.com/Stringadmin/BoltCode/internal/command"
 	"github.com/Stringadmin/BoltCode/internal/sshx"
-
-	"golang.org/x/term"
 )
 
 // runSetup is the interactive server configuration wizard.
@@ -203,13 +200,11 @@ func (s *Session) askWithBack(prompt string) (input string, back, cancel bool) {
 // navigation consistent with the rest of the config wizard without echoing an
 // API key into the terminal or readline history.
 func (s *Session) askSecretWithBack(prompt string) (input string, back, cancel bool) {
-	fmt.Print(prompt)
-	secret, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Println()
+	secret, err := s.readHidden(prompt)
 	if err != nil {
 		return "", false, true
 	}
-	input = strings.TrimSpace(string(secret))
+	input = strings.TrimSpace(secret)
 	switch strings.ToLower(input) {
 	case "b", "back":
 		return "", true, false
@@ -219,13 +214,24 @@ func (s *Session) askSecretWithBack(prompt string) (input string, back, cancel b
 	return input, false, false
 }
 
-// askPassword reads a password without echoing it to the terminal.
+// readHidden uses readline's own password mode so the normal prompt and the
+// secret prompt share one Windows console reader. Mixing readline with
+// term.ReadPassword causes both readers to race for key events and can leave
+// Ctrl/Alt state stuck, turning letters such as b/d/f into editing commands.
+func (s *Session) readHidden(prompt string) (string, error) {
+	cfg := s.rl.GenPasswordConfig()
+	cfg.Prompt = prompt
+	cfg.MaskRune = '*'
+	cfg.DisableAutoSaveHistory = true
+	secret, err := s.rl.ReadPasswordWithConfig(cfg)
+	return strings.TrimSpace(string(secret)), err
+}
+
+// askPassword reads a password as masked input without saving it to history.
 func (s *Session) askPassword(prompt string) string {
-	fmt.Print(prompt)
-	pw, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Println() // newline after hidden input
+	pw, err := s.readHidden(prompt)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(pw))
+	return pw
 }

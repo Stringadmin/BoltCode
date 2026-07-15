@@ -17,11 +17,11 @@ var Tools = []map[string]interface{}{
 	},
 	{
 		"name":        "write_file",
-		"description": "Create a new file or completely overwrite an existing one.",
+		"description": "Create a new file or completely overwrite an existing one. Prefer a path relative to the working directory.",
 		"input_schema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path":    map[string]string{"type": "string", "description": "File path"},
+				"path":    map[string]string{"type": "string", "description": "File path relative to working directory"},
 				"content": map[string]string{"type": "string", "description": "Full file content"},
 			},
 			"required": []string{"path", "content"},
@@ -29,11 +29,11 @@ var Tools = []map[string]interface{}{
 	},
 	{
 		"name":        "edit_file",
-		"description": "Make a targeted edit to an existing file by replacing a specific string. Use this instead of write_file when modifying existing code.",
+		"description": "Make a targeted edit to an existing file by replacing a specific string. Use this instead of write_file when modifying existing code. Prefer a path relative to the working directory.",
 		"input_schema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path":       map[string]string{"type": "string", "description": "File path"},
+				"path":       map[string]string{"type": "string", "description": "File path relative to working directory"},
 				"old_string": map[string]string{"type": "string", "description": "Exact string to find and replace"},
 				"new_string": map[string]string{"type": "string", "description": "Replacement string"},
 			},
@@ -70,7 +70,7 @@ var Tools = []map[string]interface{}{
 		"input_schema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]string{"type": "string", "description": "Directory (default: current dir)"},
+				"path": map[string]string{"type": "string", "description": "Directory relative to working directory (default: current dir)"},
 			},
 		},
 	},
@@ -113,7 +113,7 @@ var Tools = []map[string]interface{}{
 		"input_schema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path": map[string]string{"type": "string", "description": "File path"},
+				"path": map[string]string{"type": "string", "description": "File path relative to working directory"},
 				"edits": map[string]interface{}{
 					"type": "array",
 					"items": map[string]interface{}{

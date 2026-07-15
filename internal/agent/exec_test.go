@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -21,19 +22,19 @@ func TestSafeJoin(t *testing.T) {
 		{"simple file", "main.go", false},
 		{"nested path", "src/utils/helper.go", false},
 		{"dot prefix", "./README.md", false},
+		{"absolute path inside workdir", filepath.Join(workdir, "main.go"), false},
 		{"traversal blocked", "../../../etc/passwd", true},
 		{"traversal in middle", "src/../../secret.txt", true},
 		{"dot-dot only", "..", true},
 	}
 
-	// On Unix, /etc/passwd is absolute and must be rejected.
-	// On Windows, it's relative (resolves inside workdir) so it's safe.
+	// An absolute path outside the workdir must still be rejected.
 	if runtime.GOOS != "windows" {
 		tests = append(tests, struct {
 			name    string
 			path    string
 			wantErr bool
-		}{"unix absolute path blocked", "/etc/passwd", true})
+		}{"unix absolute outside blocked", "/etc/passwd", true})
 	}
 
 	if runtime.GOOS == "windows" {
@@ -41,7 +42,7 @@ func TestSafeJoin(t *testing.T) {
 			name    string
 			path    string
 			wantErr bool
-		}{"windows absolute blocked", `D:\other\file.txt`, true})
+		}{"windows absolute outside blocked", `D:\other\file.txt`, true})
 	}
 
 	for _, tt := range tests {
@@ -82,6 +83,20 @@ func TestToolEditFileUniqueMatch(t *testing.T) {
 	got, _ := os.ReadFile(path)
 	if string(got) != "foo\nBAR\nbaz\n" {
 		t.Fatalf("file content = %q, want %q", string(got), "foo\nBAR\nbaz\n")
+	}
+}
+
+func TestToolReadFileAcceptsAbsolutePathInsideWorkdir(t *testing.T) {
+	a := newAgentInTemp(t)
+	path := filepath.Join(a.Workdir, "main.go")
+	writeFile(t, path, "package main\n")
+
+	content, isErr := a.toolReadFile(path, "", "")
+	if isErr {
+		t.Fatalf("absolute in-workdir path should be accepted: %s", content)
+	}
+	if !strings.Contains(content, "package main") {
+		t.Fatalf("content = %q", content)
 	}
 }
 

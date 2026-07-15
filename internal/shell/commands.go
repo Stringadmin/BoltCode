@@ -523,7 +523,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			if apiKey != "" {
 				shown = "已设置 " + maskKey(apiKey)
 			}
-			fmt.Println(infoStyle.Render("  输入内容不会显示在终端；留空保留已有 Key"))
+			fmt.Println(infoStyle.Render("  输入内容仅显示为 *，不会写入命令历史；留空保留已有 Key"))
 			in, back, cancel := s.askSecretWithBack(fmt.Sprintf("  API Key [%s]: ", shown))
 			if cancel {
 				return nil, false

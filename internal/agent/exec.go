@@ -37,29 +37,38 @@ var secretEnvVars = []string{
 }
 
 // safeJoin resolves path against workdir and guarantees the result stays inside
-// workdir — including after symlink resolution. It rejects absolute paths and
-// any ".." traversal so a tool call can never read or write outside the task's
-// isolated worktree.
+// workdir — including after symlink resolution. Relative paths are preferred,
+// but models sometimes echo the absolute working-directory path from context;
+// an absolute path is accepted only when it still resolves inside workdir.
 //
 // Symlinks are evaluated so an attacker (or a careless AI) can't plant a
 // symlink inside the worktree pointing at /etc and then read or write through
 // it. If the workdir doesn't exist (e.g. unit tests), only the string-based
 // traversal check applies.
 func safeJoin(workdir, path string) (string, error) {
-	if filepath.IsAbs(path) {
-		return "", fmt.Errorf("path must be relative to the working directory: %q", path)
+	root, err := filepath.Abs(workdir)
+	if err != nil {
+		return "", fmt.Errorf("resolving working directory: %w", err)
 	}
-	full := filepath.Join(workdir, filepath.Clean(path))
+	root = filepath.Clean(root)
 
-	// String-based traversal check (catches ".." in the path itself).
-	rel, err := filepath.Rel(workdir, full)
+	full := ""
+	if filepath.IsAbs(path) {
+		full = filepath.Clean(path)
+	} else {
+		full = filepath.Join(root, filepath.Clean(path))
+	}
+
+	// String-based containment check catches both ".." traversal and absolute
+	// paths that point outside the workspace.
+	rel, err := filepath.Rel(root, full)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes the working directory", path)
 	}
 
 	// Resolve the workdir's real path. If it doesn't exist (unit tests use a
 	// synthetic path), the string check above is all we can do.
-	realWorkdir, err := filepath.EvalSymlinks(workdir)
+	realWorkdir, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return full, nil
 	}

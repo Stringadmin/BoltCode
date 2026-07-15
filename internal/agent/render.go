@@ -421,17 +421,22 @@ func toolIcon(action string) (icon, color string) {
 // icon and accent color matched to the tool kind.
 func printToolHeader(icon, action, detail string) {
 	_, color := toolIcon(action)
-	fmt.Printf("\n  "+ansiDarkGray+"╭─"+ansiReset+" %s "+color+ansiBold+"%s"+ansiReset+" %s\n", icon, action, detail)
+	fmt.Printf("\n    "+ansiDarkGray+"╭─"+ansiReset+" %s "+color+ansiBold+"%s"+ansiReset+"\n", icon, action)
+	if strings.TrimSpace(detail) != "" {
+		fmt.Printf("    "+ansiDarkGray+"│"+ansiReset+"  "+ansiGray+"%s"+ansiReset+"\n", detail)
+	}
 }
 
 // printToolFooter shows tool result status with a colored glyph.
 func printToolFooter(success bool, msg string) {
 	if success {
-		fmt.Printf("  "+ansiDarkGray+"╰─"+ansiReset+" "+ansiGreen+"✓"+ansiReset+" "+ansiGray+"%s"+ansiReset+"\n", msg)
+		fmt.Printf("    "+ansiDarkGray+"╰─"+ansiReset+" "+ansiGreen+"✓"+ansiReset+" "+ansiGray+"%s"+ansiReset+"\n", msg)
 	} else {
-		fmt.Printf("  "+ansiDarkGray+"╰─"+ansiReset+" "+ansiRed+"✗"+ansiReset+" "+ansiRed+"%s"+ansiReset+"\n", msg)
+		fmt.Printf("    "+ansiDarkGray+"╰─"+ansiReset+" "+ansiRed+"✗"+ansiReset+" "+ansiRed+"%s"+ansiReset+"\n", msg)
 	}
-	if !tuiMode {
+	if tuiMode {
+		fmt.Println()
+	} else {
 		fmt.Print("  \033[38;5;75m❯\033[0m\n") // persistent prompt (shell mode only)
 	}
 }

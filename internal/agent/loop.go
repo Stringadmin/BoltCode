@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -82,6 +83,7 @@ For any multi-step task (3+ steps), create a todo list FIRST with todo_write, ma
 - Mark completed immediately after finishing each step
 
 ## Editing Files
+- File tools should use paths relative to the working directory (for example main.go or internal/agent), never repeat the absolute working-directory prefix
 - Use multi_edit (not repeated edit_file) when modifying the same file several times — it's atomic: either all edits apply or none do
 - old_string must be UNIQUE in the file; include surrounding context to disambiguate
 
@@ -125,6 +127,7 @@ func (a *Agent) Run(inputFn func() string) error {
 	a.InputFn = inputFn // expose to slash commands needing follow-up input
 
 	resuming := len(a.Messages) > 0
+	var initParts []string
 	if !resuming {
 		// Record the session start time so resume-of-resume keeps the original.
 		now := time.Now()
@@ -138,20 +141,11 @@ func (a *Agent) Run(inputFn func() string) error {
 		projectCtx := a.scanProject()
 
 		// Build initial context message
-		var initParts []string
 		if memCtx != "" {
 			initParts = append(initParts, "## Memory (from past sessions)\n"+memCtx)
 		}
 		if projectCtx != "" {
 			initParts = append(initParts, "## Current Project\n"+projectCtx)
-		}
-		initMsg := "Hi."
-		if len(initParts) > 0 {
-			initMsg = "Hi. Here is the project context:\n\n" + strings.Join(initParts, "\n\n") + "\n\nPlease greet me briefly and ask what I need."
-		}
-
-		a.Messages = []Message{
-			{Role: "user", Content: initMsg},
 		}
 	} else {
 		fmt.Println()
@@ -170,6 +164,34 @@ func (a *Agent) Run(inputFn func() string) error {
 				fmt.Printf("  "+ansiGreen+"✓ compacted to %d messages"+ansiReset+"\n", len(a.Messages))
 			}
 		}
+	}
+
+	if tuiMode {
+		// The TUI renders its own local welcome panel. Wait for the first real
+		// instruction instead of spending an API round on a generated greeting;
+		// this also makes the UI's ready handshake authoritative from turn one.
+		firstInput := ""
+		ok := true
+		if !resuming && strings.TrimSpace(a.Intent) != "" {
+			firstInput = strings.TrimSpace(a.Intent)
+		} else {
+			firstInput, ok = a.waitForUserInput(inputFn)
+		}
+		if !ok {
+			return nil
+		}
+		if resuming {
+			a.Messages = append(a.Messages, Message{Role: "user", Content: firstInput})
+		} else {
+			a.Messages = []Message{{Role: "user", Content: composeInitialUserMessage(initParts, firstInput)}}
+		}
+	} else if !resuming {
+		// Preserve the classic shell greeting outside the full-screen TUI.
+		initMsg := "Hi."
+		if len(initParts) > 0 {
+			initMsg = "Hi. Here is the project context:\n\n" + strings.Join(initParts, "\n\n") + "\n\nPlease greet me briefly and ask what I need."
+		}
+		a.Messages = []Message{{Role: "user", Content: initMsg}}
 	}
 
 	for round := 0; round < 100; round++ {
@@ -224,46 +246,12 @@ func (a *Agent) Run(inputFn func() string) error {
 				}
 			}
 
-			// Inner loop: handle slash commands and empty input without calling
-			// the API. Only break when the user sends a real message or exits.
-			shouldExit := false
-			for {
-				// /exit (via the slash-command picker) sets this flag.
-				if a.ShouldExit {
-					shouldExit = true
-					break
-				}
-
-				input := inputFn()
-
-				// Empty input = just pressed Enter, keep waiting
-				if input == "" {
-					continue
-				}
-
-				// Handle slash commands. Anything starting with "/" is a command —
-				// an unknown one must NOT be sent to the AI as a prompt (that was
-				// a bug: /typo got answered by the model). Show a hint instead.
-				if strings.HasPrefix(input, "/") {
-					if a.handleSlashCommand(input) {
-						continue
-					}
-					fmt.Println("  " + ansiYellow + "unknown command: " + input + ansiReset)
-					fmt.Println("  " + ansiDarkGray + "type /help for the command list" + ansiReset)
-					continue
-				}
-
-				if input == "exit" || input == "done" || input == "quit" {
-					shouldExit = true
-					break
-				}
-				a.Messages = append(a.Messages, Message{Role: "user", Content: input})
-				a.ToolErrorCount = 0 // user is steering in a new direction — reset retries
+			input, ok := a.waitForUserInput(inputFn)
+			if !ok {
 				break
 			}
-			if shouldExit {
-				break
-			}
+			a.Messages = append(a.Messages, Message{Role: "user", Content: input})
+			a.ToolErrorCount = 0 // user is steering in a new direction — reset retries
 			continue
 		}
 
@@ -331,6 +319,39 @@ func (a *Agent) Run(inputFn func() string) error {
 		}
 	}
 	return nil
+}
+
+// waitForUserInput filters empty lines and slash commands until it receives a
+// real prompt. The bool is false when the session should exit.
+func (a *Agent) waitForUserInput(inputFn func() string) (string, bool) {
+	for {
+		if a.ShouldExit {
+			return "", false
+		}
+		input := strings.TrimSpace(inputFn())
+		if input == "" {
+			continue
+		}
+		if strings.HasPrefix(input, "/") {
+			if a.handleSlashCommand(input) {
+				continue
+			}
+			fmt.Println("  " + ansiYellow + "unknown command: " + input + ansiReset)
+			fmt.Println("  " + ansiDarkGray + "type /help for the command list" + ansiReset)
+			continue
+		}
+		if input == "exit" || input == "done" || input == "quit" {
+			return "", false
+		}
+		return input, true
+	}
+}
+
+func composeInitialUserMessage(contextParts []string, input string) string {
+	if len(contextParts) == 0 {
+		return input
+	}
+	return strings.Join(contextParts, "\n\n") + "\n\n## User request\n" + input
 }
 
 // currentContextTokens returns the best estimate of current context size: the
@@ -420,11 +441,11 @@ func (a *Agent) printToolUse(tc ToolCall) {
 
 	switch tc.Name {
 	case "read_file":
-		printToolHeader("📖", "Read", input["path"])
+		printToolHeader("📖", "Read", a.displayToolPath(input["path"]))
 	case "write_file":
-		printToolHeader("📝", "Write", input["path"])
+		printToolHeader("📝", "Write", a.displayToolPath(input["path"]))
 	case "edit_file":
-		printToolHeader("✏️", "Edit", input["path"])
+		printToolHeader("✏️", "Edit", a.displayToolPath(input["path"]))
 	case "search_code":
 		printToolHeader("🔍", "Search", truncate(input["pattern"], 40))
 	case "run_command":
@@ -434,13 +455,13 @@ func (a *Agent) printToolUse(tc ToolCall) {
 		if path == "" {
 			path = "."
 		}
-		printToolHeader("📁", "List", path)
+		printToolHeader("📁", "List", a.displayToolPath(path))
 	case "update_memory":
 		printToolHeader("🧠", "Memory", input["key"])
 	case "todo_write":
 		printToolHeader("📋", "Plan", "update task list")
 	case "multi_edit":
-		printToolHeader("✏️", "MultiEdit", input["path"])
+		printToolHeader("✏️", "MultiEdit", a.displayToolPath(input["path"]))
 	case "glob":
 		printToolHeader("🔎", "Glob", truncate(input["pattern"], 40))
 	}
@@ -453,7 +474,14 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 	dur := toolDurationLabel(elapsed)
 
 	if result.IsError {
-		printToolFooter(false, truncate(result.Content, 70))
+		for _, line := range wrapToolError(result.Content, 88, 4) {
+			fmt.Printf("    "+ansiDarkGray+"│"+ansiReset+"  "+ansiRed+"%s"+ansiReset+"\n", line)
+		}
+		footer := "failed"
+		if dur != "" {
+			footer += " · " + dur
+		}
+		printToolFooter(false, footer)
 		return
 	}
 
@@ -468,10 +496,10 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 			more = len(lines) - 5
 		}
 		for _, l := range preview {
-			fmt.Printf("  "+ansiDarkGray+"│"+ansiReset+" "+ansiGray+"%s"+ansiReset+"\n", l)
+			fmt.Printf("    "+ansiDarkGray+"│"+ansiReset+"  "+ansiGray+"%s"+ansiReset+"\n", l)
 		}
 		if more > 0 {
-			fmt.Printf("  "+ansiDarkGray+"│"+ansiReset+" "+ansiDim+"… %d more lines"+ansiReset+"\n", more)
+			fmt.Printf("    "+ansiDarkGray+"│"+ansiReset+"  "+ansiDim+"… %d more lines"+ansiReset+"\n", more)
 		}
 	case "edit_file", "multi_edit":
 		// Show a compact diff preview if the tool populated one.
@@ -507,6 +535,72 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 		footer = dur
 	}
 	printToolFooter(true, footer)
+}
+
+func (a *Agent) displayToolPath(path string) string {
+	if path == "" {
+		return "."
+	}
+	clean := filepath.Clean(path)
+	if filepath.IsAbs(clean) && a.Workdir != "" {
+		if rel, err := filepath.Rel(a.Workdir, clean); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			clean = rel
+		}
+	}
+	return truncate(filepath.ToSlash(clean), 88)
+}
+
+func wrapToolError(text string, width, maxLines int) []string {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\r", ""))
+	if text == "" {
+		return []string{"unknown error"}
+	}
+	var lines []string
+	for _, logical := range strings.Split(text, "\n") {
+		lines = append(lines, wrapToolErrorLine(logical, width)...)
+	}
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+		lines[maxLines-1] = strings.TrimSpace(lines[maxLines-1]) + " …"
+	}
+	return lines
+}
+
+func wrapToolErrorLine(text string, width int) []string {
+	remaining := []rune(strings.TrimSpace(text))
+	var lines []string
+	for len(remaining) > 0 {
+		used := 0
+		cut := 0
+		lastSpace := -1
+		for i, r := range remaining {
+			runeWidth := 1
+			if isWide(r) {
+				runeWidth = 2
+			}
+			if used+runeWidth > width {
+				break
+			}
+			used += runeWidth
+			cut = i + 1
+			if r == ' ' || r == '\t' {
+				lastSpace = i
+			}
+		}
+		if cut == len(remaining) {
+			lines = append(lines, strings.TrimSpace(string(remaining)))
+			break
+		}
+		if lastSpace > 0 {
+			cut = lastSpace
+		}
+		if cut == 0 {
+			cut = 1
+		}
+		lines = append(lines, strings.TrimSpace(string(remaining[:cut])))
+		remaining = []rune(strings.TrimSpace(string(remaining[cut:])))
+	}
+	return lines
 }
 
 // truncate shortens s to max runes (newline-flattened) with a "…" indicator.

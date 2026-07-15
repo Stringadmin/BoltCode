@@ -108,7 +108,8 @@ func (s *Session) launchAgent(workdir, intent string, task *model.Task) {
 
 	// Launch the chat TUI. The agent runs in a goroutine inside RunChat;
 	// its stdout is captured to a pipe and displayed in the TUI's message
-	// area. The input box stays visible and interactive at all times.
+	// area. The input box accepts one message whenever the agent is ready and
+	// remains available as a draft editor while a response is in progress.
 	if err := tui.RunChat(a); err != nil {
 		fmt.Println(errStyle.Render("  tui error: " + err.Error()))
 	}

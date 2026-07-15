@@ -2,6 +2,8 @@ package shell
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -127,5 +129,44 @@ func TestRunConfigCancelBeforeSave(t *testing.T) {
 	}
 	if len(profiles) != 0 {
 		t.Fatalf("cancelled wizard saved %d profiles", len(profiles))
+	}
+}
+
+func TestRunConfigPasswordKeepsFollowingInputIntact(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".boltcode"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// The model deliberately contains b/d/f. On Windows these letters were
+	// previously interpreted as editing commands after term.ReadPassword raced
+	// with readline for console events.
+	input := "test-profile\n4\nsk-dfb-secret\ndfb-model\n\n\n"
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt: mainPrompt,
+		Stdin:  io.NopCloser(strings.NewReader(input)),
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rl.Close()
+
+	s := &Session{rl: rl}
+	s.runConfig(nil)
+
+	profiles, current, err := command.ListProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 || current != "test-profile" {
+		t.Fatalf("profiles = %+v, current = %q", profiles, current)
+	}
+	p := profiles[0]
+	if p.Provider != "deepseek" || p.APIKey != "sk-dfb-secret" || p.Model != "dfb-model" {
+		t.Fatalf("saved input was corrupted: %+v", p)
 	}
 }

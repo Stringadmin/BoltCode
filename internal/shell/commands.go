@@ -2,7 +2,9 @@ package shell
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
@@ -16,7 +18,7 @@ func (s *Session) showHelp() {
 	solo := `
   Commands (solo mode):
     run [instruction]    launch AI agent here (no task/worktree needed)
-    config               set API key + model for the agent
+    config               manage AI provider profiles
     setup                connect a remote (GitHub / self-hosted)
     spec [init]          show / create project spec
     push / pull          push to / pull from remote
@@ -360,52 +362,83 @@ func (s *Session) runPull() {
 func (s *Session) runConfig(args []string) {
 	defer s.rl.SetPrompt(mainPrompt)
 	fmt.Println()
-	fmt.Println(titleStyle.Render("  ╔══════════════════════════════════════╗"))
-	fmt.Println(titleStyle.Render("  ║   BoltCode — AI Agent 配置            ║"))
-	fmt.Println(titleStyle.Render("  ╚══════════════════════════════════════╝"))
-	fmt.Println()
-	fmt.Println(infoStyle.Render("  管理服务商配置档案（API Key 存本地，不上传）"))
+	fmt.Println(titleStyle.Render("  BoltCode / 服务商配置"))
+	fmt.Println(infoStyle.Render("  API Key 仅保存在本机，并以加密形式写入配置文件"))
 	fmt.Println()
 
 	// Show existing profiles + current.
-	profiles, current, _ := command.ListProfiles()
+	profiles, current, err := command.ListProfiles()
+	if err != nil {
+		fmt.Println(errStyle.Render("  读取配置失败: " + err.Error()))
+		return
+	}
 	if len(profiles) > 0 {
-		fmt.Println(infoStyle.Render("  已有配置档案:"))
-		for _, p := range profiles {
-			marker := "  "
+		fmt.Println(titleStyle.Render("  配置档案"))
+		for i, p := range profiles {
+			marker := "○"
 			if p.Name == current {
-				marker = "▶ "
+				marker = "●"
 			}
-			fmt.Printf("  %s%-14s %s / %s\n", marker, p.Name, p.Provider, p.Model)
+			fmt.Printf("  %s [%d] %s\n", marker, i+1, p.Name)
+			fmt.Println(infoStyle.Render(fmt.Sprintf("        %s · %s", providerDisplay(p.Provider), p.Model)))
 		}
 		fmt.Println()
 	} else {
-		fmt.Println(infoStyle.Render("  还没有配置档案，先创建一个。"))
+		fmt.Println(infoStyle.Render("  还没有配置档案，创建第一个即可开始使用。"))
 		fmt.Println()
 	}
 
-	// Choose: new profile, or edit an existing one by name.
-	fmt.Println(infoStyle.Render("  输入新档案名创建 · 输入已有档案名编辑 · 回车退出"))
-	in, _, cancel := s.askWithBack("  档案名 (如 anthropic / 火山方舟): ")
-	if cancel || in == "" {
-		fmt.Println(errStyle.Render("  退出"))
+	name := ""
+	if len(profiles) > 0 {
+		for name == "" {
+			fmt.Println(infoStyle.Render("  输入编号或名称编辑 · n 新建 · 回车返回"))
+			in, _, cancel := s.askWithBack("  选择: ")
+			if cancel || in == "" {
+				fmt.Println(infoStyle.Render("  已返回"))
+				return
+			}
+			if strings.EqualFold(in, "n") || strings.EqualFold(in, "new") {
+				name = s.ask("  新档案名 (如 work / local): ")
+				break
+			}
+			var exists bool
+			name, exists = profileNameFromInput(in, profiles)
+			if !exists {
+				fmt.Println(errStyle.Render("  未找到该档案；请输入列表编号，或用 n 新建"))
+				name = ""
+			}
+		}
+	} else {
+		name = s.ask("  档案名 (如 work / local): ")
+	}
+	if name == "" {
+		fmt.Println(infoStyle.Render("  已取消"))
 		return
 	}
-	name := in
+	if existingName, exists := existingProfileName(name, profiles); exists {
+		name = existingName
+	}
 
 	// Pre-fill from that profile if it exists, else defaults.
 	prefill := &agent.Config{Provider: "anthropic", Model: agent.DefaultModel}
+	isEditing := false
 	for _, p := range profiles {
 		if p.Name == name {
 			c := p.ToConfig()
 			prefill = &c
+			isEditing = true
 			break
 		}
+	}
+	if isEditing {
+		fmt.Println(infoStyle.Render(fmt.Sprintf("\n  正在编辑 %q；留空即可保留原值", name)))
+	} else {
+		fmt.Println(infoStyle.Render(fmt.Sprintf("\n  正在创建 %q", name)))
 	}
 
 	cfg, ok := s.editProfileFields(name, prefill)
 	if !ok {
-		fmt.Println(errStyle.Render("  取消"))
+		fmt.Println(infoStyle.Render("  未保存任何更改"))
 		return
 	}
 	if err := command.SaveProfile(name, cfg); err != nil {
@@ -414,16 +447,15 @@ func (s *Session) runConfig(args []string) {
 	}
 	fmt.Println()
 	fmt.Println(okStyle.Render(fmt.Sprintf("  ✓ 档案 %q 已保存并设为当前", name)))
-	fmt.Println(infoStyle.Render(fmt.Sprintf("  provider: %s, model: %s", cfg.Provider, cfg.Model)))
-	fmt.Println(infoStyle.Render("  切换档案用: /profile <名称>   ·   现在可以用 'run' 启动 AI 编程"))
+	fmt.Println(infoStyle.Render(fmt.Sprintf("  %s · %s", providerDisplay(cfg.Provider), cfg.Model)))
+	fmt.Println(infoStyle.Render("  接下来可运行 run，或在会话中用 /profile 切换档案"))
 }
 
 // editProfileFields runs the navigable 4-field form for one profile, pre-filled
 // from prefill. Returns the completed config and ok=true on save, ok=false on
 // cancel.
 func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.Config, bool) {
-	fmt.Println(infoStyle.Render("  提示：回车=保留当前值 · b=返回上一步 · q=取消"))
-	fmt.Println()
+	fmt.Println(infoStyle.Render("  回车保留 · b 返回上一步 · q 取消"))
 
 	provider := prefill.Provider
 	if provider == "" {
@@ -448,21 +480,51 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 	for {
 		switch step {
 		case stepProvider:
-			in, _, cancel := s.askWithBack(fmt.Sprintf("  [1/4] API 提供商 [%s]: ", provider))
+			renderConfigStep(1, 4, "选择服务商")
+			for i, p := range agent.KnownProviders {
+				marker := " "
+				if strings.EqualFold(provider, p.ID) {
+					marker = "●"
+				}
+				fmt.Printf("  %s %d. %s [%s]\n", marker, i+1, p.Name, p.ID)
+			}
+			if _, known := agent.ProviderByID(provider); !known {
+				fmt.Println(infoStyle.Render("    当前自定义 provider: " + provider))
+			}
+			in, back, cancel := s.askWithBack(fmt.Sprintf("  选择编号或 provider ID [%s]: ", provider))
 			if cancel {
 				return nil, false
 			}
+			if back {
+				return nil, false
+			}
 			if in != "" {
-				provider = in
+				picked, valid := providerFromInput(in)
+				if !valid {
+					fmt.Println(errStyle.Render("  请输入列表中的编号，或自定义 provider ID"))
+					continue
+				}
+				if !strings.EqualFold(provider, picked.ID) {
+					provider = picked.ID
+					baseURL = picked.BaseURL
+					options := agent.ModelsForProvider(provider)
+					if len(options) > 0 {
+						model = options[0].ID
+					} else {
+						model = ""
+					}
+				}
 			}
 			step = stepAPIKey
 
 		case stepAPIKey:
+			renderConfigStep(2, 4, "配置 API Key")
 			shown := "未设置"
 			if apiKey != "" {
-				shown = maskKey(apiKey) + "（回车保留，输入新值覆盖）"
+				shown = "已设置 " + maskKey(apiKey)
 			}
-			in, back, cancel := s.askWithBack(fmt.Sprintf("  [2/4] API Key [%s]: ", shown))
+			fmt.Println(infoStyle.Render("  输入内容不会显示在终端；留空保留已有 Key"))
+			in, back, cancel := s.askSecretWithBack(fmt.Sprintf("  API Key [%s]: ", shown))
 			if cancel {
 				return nil, false
 			}
@@ -480,7 +542,25 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			step = stepModel
 
 		case stepModel:
-			in, back, cancel := s.askWithBack(fmt.Sprintf("  [3/4] 模型 [%s]: ", model))
+			renderConfigStep(3, 4, "选择模型")
+			models := agent.ModelsForProvider(provider)
+			for i, option := range models {
+				marker := " "
+				if option.ID == model {
+					marker = "●"
+				}
+				label := option.Label
+				if label == "" {
+					label = option.ID
+				}
+				fmt.Printf("  %s %d. %s [%s]\n", marker, i+1, label, option.ID)
+			}
+			if len(models) == 0 {
+				fmt.Println(infoStyle.Render("  此服务商没有内置模型列表，请输入模型 ID"))
+			} else {
+				fmt.Println(infoStyle.Render("  也可以直接输入列表外的模型 ID"))
+			}
+			in, back, cancel := s.askWithBack(fmt.Sprintf("  选择编号或模型 ID [%s]: ", orDefault(model, "未设置")))
 			if cancel {
 				return nil, false
 			}
@@ -489,16 +569,30 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 				continue
 			}
 			if in != "" {
-				model = in
+				picked, valid := modelFromInput(in, models)
+				if !valid {
+					fmt.Println(errStyle.Render("  模型编号超出范围，请重新输入"))
+					continue
+				}
+				model = picked
+			}
+			if model == "" {
+				fmt.Println(errStyle.Render("  模型不能为空"))
+				continue
 			}
 			step = stepBaseURL
 
 		case stepBaseURL:
-			shown := baseURL
-			if shown == "" {
-				shown = "默认"
+			renderConfigStep(4, 4, "确认 API 地址")
+			defaultURL := providerDefaultURL(provider)
+			shown := orDefault(baseURL, "服务商默认")
+			if providerRequiresBaseURL(provider) {
+				shown = orDefault(baseURL, "未设置")
+				fmt.Println(infoStyle.Render("  自定义服务商需要完整的 http:// 或 https:// 地址"))
+			} else {
+				fmt.Println(infoStyle.Render("  留空保留当前值 · 输入 - 恢复服务商默认地址"))
 			}
-			in, back, cancel := s.askWithBack(fmt.Sprintf("  [4/4] API 地址 [%s]: ", shown))
+			in, back, cancel := s.askWithBack(fmt.Sprintf("  Base URL [%s]: ", shown))
 			if cancel {
 				return nil, false
 			}
@@ -506,22 +600,37 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 				step = stepModel
 				continue
 			}
-			if in != "" {
+			if in == "-" {
+				baseURL = defaultURL
+			} else if in != "" {
 				baseURL = in
+			}
+			if providerRequiresBaseURL(provider) && baseURL == "" {
+				fmt.Println(errStyle.Render("  自定义服务商需要填写 Base URL"))
+				continue
+			}
+			if err := validateBaseURL(baseURL); err != nil {
+				fmt.Println(errStyle.Render("  " + err.Error()))
+				continue
 			}
 			step = stepConfirm
 
 		case stepConfirm:
 			fmt.Println()
-			fmt.Println(infoStyle.Render("  ── 确认档案 " + name + " ──"))
-			fmt.Printf("  提供商:  %s\n", provider)
-			fmt.Printf("  API Key: %s\n", maskKey(apiKey))
-			fmt.Printf("  模型:    %s\n", model)
-			fmt.Printf("  地址:    %s\n", orDefault(baseURL, "默认"))
+			fmt.Println(titleStyle.Render("  保存前确认"))
+			fmt.Printf("  1  服务商   %s\n", providerDisplay(provider))
+			fmt.Printf("  2  API Key  %s\n", maskKey(apiKey))
+			fmt.Printf("  3  模型      %s\n", model)
+			fmt.Printf("  4  地址      %s\n", orDefault(baseURL, "服务商默认"))
+			fmt.Println(infoStyle.Render("     档案名    " + name))
 			fmt.Println()
-			in, _, cancel := s.askWithBack("  保存？[Y=保存 / b=返回编辑 / q=取消]: ")
+			in, back, cancel := s.askWithBack("  回车/Y 保存 · 1-4 修改对应项 · q 取消: ")
 			if cancel {
 				return nil, false
+			}
+			if back {
+				step = stepBaseURL
+				continue
 			}
 			switch strings.ToLower(in) {
 			case "q", "quit", "cancel":
@@ -529,16 +638,127 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			case "b", "back":
 				step = stepBaseURL
 				continue
-			default:
+			case "1":
+				step = stepProvider
+				continue
+			case "2":
+				step = stepAPIKey
+				continue
+			case "3":
+				step = stepModel
+				continue
+			case "4":
+				step = stepBaseURL
+				continue
+			case "", "y", "yes":
 				return &agent.Config{
 					Provider: provider,
 					APIKey:   apiKey,
 					Model:    model,
 					BaseURL:  baseURL,
 				}, true
+			default:
+				fmt.Println(errStyle.Render("  请输入 Y、1-4 或 q"))
 			}
 		}
 	}
+}
+
+func renderConfigStep(step, total int, title string) {
+	progress := strings.TrimSpace(strings.Repeat("● ", step) + strings.Repeat("○ ", total-step))
+	fmt.Println()
+	fmt.Println(titleStyle.Render(fmt.Sprintf("  %d/%d  %s", step, total, title)))
+	fmt.Println(infoStyle.Render("  " + progress))
+}
+
+func profileNameFromInput(input string, profiles []agent.Profile) (string, bool) {
+	input = strings.TrimSpace(input)
+	if n, err := strconv.Atoi(input); err == nil {
+		if n < 1 || n > len(profiles) {
+			return input, false
+		}
+		return profiles[n-1].Name, true
+	}
+	if name, ok := existingProfileName(input, profiles); ok {
+		return name, true
+	}
+	return input, false
+}
+
+func existingProfileName(input string, profiles []agent.Profile) (string, bool) {
+	for _, p := range profiles {
+		if strings.EqualFold(p.Name, strings.TrimSpace(input)) {
+			return p.Name, true
+		}
+	}
+	return "", false
+}
+
+func providerFromInput(input string) (agent.ProviderInfo, bool) {
+	input = strings.TrimSpace(input)
+	if n, err := strconv.Atoi(input); err == nil {
+		if n < 1 || n > len(agent.KnownProviders) {
+			return agent.ProviderInfo{}, false
+		}
+		return agent.KnownProviders[n-1], true
+	}
+	if p, ok := agent.ProviderByID(input); ok {
+		return p, true
+	}
+	if input == "" {
+		return agent.ProviderInfo{}, false
+	}
+	return agent.ProviderInfo{ID: input, Name: input, Custom: true}, true
+}
+
+func modelFromInput(input string, models []agent.ModelOption) (string, bool) {
+	input = strings.TrimSpace(input)
+	if n, err := strconv.Atoi(input); err == nil && len(models) > 0 {
+		if n < 1 || n > len(models) {
+			return "", false
+		}
+		return models[n-1].ID, true
+	}
+	return input, input != ""
+}
+
+func providerDisplay(provider string) string {
+	if strings.TrimSpace(provider) == "" {
+		provider = "anthropic"
+	}
+	if p, ok := agent.ProviderByID(provider); ok {
+		return fmt.Sprintf("%s [%s]", p.Name, p.ID)
+	}
+	return provider + " [自定义]"
+}
+
+func providerDefaultURL(provider string) string {
+	if strings.TrimSpace(provider) == "" {
+		provider = "anthropic"
+	}
+	if p, ok := agent.ProviderByID(provider); ok {
+		return p.BaseURL
+	}
+	return ""
+}
+
+func providerRequiresBaseURL(provider string) bool {
+	if strings.TrimSpace(provider) == "" {
+		return false
+	}
+	p, ok := agent.ProviderByID(provider)
+	return !ok || p.Custom
+}
+
+func validateBaseURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.ParseRequestURI(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("Base URL 需要是完整的 http:// 或 https:// 地址")
+	}
+	return nil
 }
 
 // maskKey renders an API key as "xxxx...yyyy" so it can be shown in prompts and

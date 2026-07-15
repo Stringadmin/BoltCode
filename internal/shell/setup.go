@@ -199,6 +199,26 @@ func (s *Session) askWithBack(prompt string) (input string, back, cancel bool) {
 	return input, false, false
 }
 
+// askSecretWithBack is the hidden-input counterpart of askWithBack. It keeps
+// navigation consistent with the rest of the config wizard without echoing an
+// API key into the terminal or readline history.
+func (s *Session) askSecretWithBack(prompt string) (input string, back, cancel bool) {
+	fmt.Print(prompt)
+	secret, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if err != nil {
+		return "", false, true
+	}
+	input = strings.TrimSpace(string(secret))
+	switch strings.ToLower(input) {
+	case "b", "back":
+		return "", true, false
+	case "q", "quit", "cancel":
+		return "", false, true
+	}
+	return input, false, false
+}
+
 // askPassword reads a password without echoing it to the terminal.
 func (s *Session) askPassword(prompt string) string {
 	fmt.Print(prompt)

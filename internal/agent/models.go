@@ -62,3 +62,35 @@ func modelsForProvider(provider string) []ModelOption {
 	}
 	return providerModels[p]
 }
+
+// ProviderInfo describes a known AI provider for the config wizard: its
+// canonical id (stored in Config.Provider), a human-readable display name, the
+// default API base URL, and whether it needs fully custom endpoint settings.
+type ProviderInfo struct {
+	ID      string // stored in Config.Provider (e.g. "anthropic", "volc")
+	Name    string // display name (e.g. "Anthropic (Claude)")
+	BaseURL string // default API base URL ("" = provider default)
+	Custom  bool   // true = user must fill base URL + model manually
+}
+
+// KnownProviders is the ordered list shown in the config wizard. The final
+// entry is a catch-all "custom" option for any OpenAI-compatible endpoint.
+var KnownProviders = []ProviderInfo{
+	{ID: "anthropic", Name: "Anthropic (Claude)", BaseURL: ""},
+	{ID: "openai", Name: "OpenAI (GPT)", BaseURL: "https://api.openai.com/v1"},
+	{ID: "volc", Name: "火山方舟 (豆包/GLM)", BaseURL: "https://ark.cn-beijing.volces.com/api/v3"},
+	{ID: "deepseek", Name: "DeepSeek", BaseURL: "https://api.deepseek.com/v1"},
+	{ID: "moonshot", Name: "Moonshot (Kimi)", BaseURL: "https://api.moonshot.cn/v1"},
+	{ID: "qwen", Name: "通义千问 (Qwen)", BaseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+	{ID: "custom", Name: "自定义 (OpenAI 兼容)", BaseURL: "", Custom: true},
+}
+
+// ProviderByID returns the ProviderInfo for an id, or false if unknown.
+func ProviderByID(id string) (ProviderInfo, bool) {
+	for _, p := range KnownProviders {
+		if strings.EqualFold(p.ID, id) {
+			return p, true
+		}
+	}
+	return ProviderInfo{}, false
+}

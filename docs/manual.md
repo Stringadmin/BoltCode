@@ -91,14 +91,15 @@ boltcode init
 
 ```bash
 boltcode          # 进入交互式 shell
-> config          # 配置 API Key 和模型
+> config          # 管理服务商、API Key 和模型档案
 ```
 
 `config` 支持**多服务商档案**：你可以保存多份配置（如 `anthropic` / `火山方舟` / `local`），每份含独立的 provider、API Key、模型、base_url。向导里：
 
-- 列出已有档案，当前激活的用 `▶` 标记
-- 输入新档案名 = 创建；输入已有档案名 = 编辑
-- 每个字段可回车保留 / `b` 返回上一步 / `q` 取消，最后确认页可返回编辑
+- 已有档案、服务商和内置模型均可按编号选择，也可以直接输入自定义 provider / 模型 ID
+- 切换服务商时会自动带出推荐模型与默认 Base URL；输入 `-` 可恢复服务商默认地址
+- API Key 使用隐藏输入，不会显示在终端或写入命令历史
+- 每个字段可回车保留 / `b` 返回上一步 / `q` 取消；确认页可按 `1`–`4` 直接返回对应字段
 - 保存的档案自动设为当前
 
 > 也可以复用 Claude Code 的配置：若 `~/.boltcode/agent.json` 不存在，BoltCode 会自动读 `~/.claude/settings.json` 里的 `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`。零额外配置即可用。
@@ -415,7 +416,7 @@ boltcode
 | `init` | 初始化项目 | 通用 |
 | `run [instruction]` | solo 下在仓库根启动 Agent | solo |
 | `run <task-id>` | team 下在任务 worktree 启动 Agent | team |
-| `config` | 配置 API Key / 模型 | 通用 |
+| `config` | 管理服务商 / API Key / 模型档案 | 通用 |
 | `team init [name]` | 升级到 team 模式 | solo→team |
 | `setup` | 配置远程（托管/自托管） | 通用 |
 | `spec` / `spec init` | 查看 / 创建项目 spec | 通用 |

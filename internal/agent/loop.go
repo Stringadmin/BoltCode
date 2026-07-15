@@ -194,6 +194,7 @@ func (a *Agent) Run(inputFn func() string) error {
 		a.Messages = []Message{{Role: "user", Content: initMsg}}
 	}
 
+	var sessionErr error
 	for round := 0; round < 100; round++ {
 		// Show spinner while waiting for API
 		spin := NewSpinner("thinking...")
@@ -292,6 +293,7 @@ func (a *Agent) Run(inputFn func() string) error {
 				// stop the agent loop so it doesn't spin forever.
 				fmt.Println()
 				fmt.Printf("  " + ansiRed + "✗ tool retries exhausted — check the errors above" + ansiReset + "\n")
+				sessionErr = fmt.Errorf("tool retries exhausted after 3 failed repair attempts")
 				break
 			}
 		} else {
@@ -318,7 +320,7 @@ func (a *Agent) Run(inputFn func() string) error {
 			fmt.Printf("  "+ansiDarkGray+"✓ session saved — resume with:"+ansiReset+" boltcode --resume %s\n", id)
 		}
 	}
-	return nil
+	return sessionErr
 }
 
 // waitForUserInput filters empty lines and slash commands until it receives a
@@ -487,6 +489,8 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 
 	// Preview multi-line output (commands, searches, lists) inline.
 	switch tc.Name {
+	case "read_file":
+		fmt.Printf("    " + ansiDarkGray + "│" + ansiReset + "  " + ansiDim + "content collapsed · full file sent to AI" + ansiReset + "\n")
 	case "run_command", "search_code", "list_files":
 		lines := strings.Split(strings.TrimRight(result.Content, "\n"), "\n")
 		preview := lines
@@ -499,7 +503,7 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 			fmt.Printf("    "+ansiDarkGray+"│"+ansiReset+"  "+ansiGray+"%s"+ansiReset+"\n", l)
 		}
 		if more > 0 {
-			fmt.Printf("    "+ansiDarkGray+"│"+ansiReset+"  "+ansiDim+"… %d more lines"+ansiReset+"\n", more)
+			fmt.Printf("    "+ansiDarkGray+"│"+ansiReset+"  "+ansiDim+"▸ %d more lines collapsed · full output sent to AI"+ansiReset+"\n", more)
 		}
 	case "edit_file", "multi_edit":
 		// Show a compact diff preview if the tool populated one.

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -154,6 +155,7 @@ func TestNextAgentInputSignalsReady(t *testing.T) {
 func TestAgentDoneRejectsFurtherInput(t *testing.T) {
 	m := newChatTestModel()
 	initialLines := len(m.lines)
+	m.Update(agentResultMsg{})
 	m.Update(agentDoneMsg{})
 	m.textarea.SetValue("too late")
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
@@ -163,5 +165,25 @@ func TestAgentDoneRejectsFurtherInput(t *testing.T) {
 	}
 	if got := m.textarea.Value(); got != "too late" {
 		t.Fatalf("finished-session draft = %q, want retained", got)
+	}
+}
+
+func TestAgentErrorIsVisibleAndNotReportedAsNormalEnd(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 24
+	m.layout()
+	m.Update(agentResultMsg{err: errors.New("API 429: rate limit exceeded")})
+	m.Update(agentDoneMsg{})
+
+	if !m.finished || !m.failed {
+		t.Fatalf("finished=%v failed=%v", m.finished, m.failed)
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "Agent stopped") || !strings.Contains(view, "API 429: rate limit exceeded") {
+		t.Fatalf("agent error missing from view:\n%s", view)
+	}
+	if strings.Contains(m.statusHint, "session ended") {
+		t.Fatalf("error was mislabeled as normal end: %q", m.statusHint)
 	}
 }

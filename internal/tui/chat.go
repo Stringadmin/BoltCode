@@ -25,6 +25,7 @@ var (
 	chatUserStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
 	chatDimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	chatGreenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))
+	chatErrorStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
 	chatPromptStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 	chatTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
 	statusBarStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(lipgloss.Color("236"))
@@ -39,6 +40,7 @@ var (
 type agentLineMsg struct{ text string }
 type agentDoneMsg struct{}
 type agentReadyMsg struct{}
+type agentResultMsg struct{ err error }
 type statusTickMsg struct{}
 type confirmRequestMsg struct{ cmd string }
 
@@ -46,6 +48,7 @@ const (
 	chatReadyPlaceholder = "Type a message, / for commands, or @ for files..."
 	chatBusyPlaceholder  = "Agent is working — draft here, send when ready..."
 	chatDonePlaceholder  = "Session ended — press Ctrl+C to return"
+	chatErrorPlaceholder = "Agent stopped with an error — press Ctrl+C to return"
 )
 
 // ── ChatModel ───────────────────────────────────────────────────────────────
@@ -61,6 +64,7 @@ type ChatModel struct {
 	agentIn   chan string
 	readyCh   chan struct{}
 	agentDone chan struct{}
+	resultCh  chan error
 	lineCh    chan string
 	confirmCh chan bool // TUI → agent: command confirmation answer
 
@@ -88,6 +92,10 @@ type ChatModel struct {
 	// prevents input after the agent goroutine has stopped. statusHint is a
 	// short, transient explanation shown when a draft cannot be sent yet.
 	finished   bool
+	failed     bool
+	streamDone bool
+	resultSeen bool
+	resultErr  error
 	statusHint string
 	activity   string
 	busySince  time.Time
@@ -145,6 +153,7 @@ func NewChat(a *agent.Agent) *ChatModel {
 		agentIn:   make(chan string, 1),
 		readyCh:   make(chan struct{}, 1),
 		agentDone: make(chan struct{}, 1),
+		resultCh:  make(chan error, 1),
 		confirmCh: make(chan bool),
 		textarea:  ta,
 		spinner:   spin,
@@ -160,7 +169,7 @@ func NewChat(a *agent.Agent) *ChatModel {
 // ── Bubble Tea ──────────────────────────────────────────────────────────────
 
 func (m *ChatModel) Init() tea.Cmd {
-	return tea.Batch(m.waitForAgentLine(), m.waitForAgentReady(), m.statusTick(), m.waitForConfirm(), m.spinner.Tick, textarea.Blink)
+	return tea.Batch(m.waitForAgentLine(), m.waitForAgentReady(), m.waitForAgentResult(), m.statusTick(), m.waitForConfirm(), m.spinner.Tick, textarea.Blink)
 }
 
 func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -192,12 +201,20 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.waitForAgentLine())
 
 	case agentDoneMsg:
-		m.busy = false
-		m.finished = true
-		m.statusHint = "session ended"
-		m.activity = ""
-		m.textarea.Placeholder = chatDonePlaceholder
-		m.refreshViewport()
+		m.streamDone = true
+		if m.resultSeen {
+			m.finishAgent(m.resultErr)
+		} else {
+			m.activity = "Finalizing session"
+			m.refreshViewport()
+		}
+
+	case agentResultMsg:
+		m.resultSeen = true
+		m.resultErr = msg.err
+		if m.streamDone {
+			m.finishAgent(msg.err)
+		}
 
 	case agentReadyMsg:
 		if !m.finished {
@@ -245,6 +262,32 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *ChatModel) finishAgent(err error) {
+	if m.finished {
+		return
+	}
+	m.busy = false
+	m.finished = true
+	m.activity = ""
+	if err != nil {
+		m.failed = true
+		m.statusHint = "agent stopped with an error"
+		m.textarea.Placeholder = chatErrorPlaceholder
+		m.lines = append(m.lines,
+			"",
+			chatErrorStyle.Render("  ╭─ ✕ Agent stopped"),
+			chatErrorStyle.Render("  │  ")+err.Error(),
+			chatDimStyle.Render("  ╰─ Check the provider/network settings, then restart the session."),
+		)
+		m.logDirty = true
+	} else {
+		m.statusHint = "session ended"
+		m.textarea.Placeholder = chatDonePlaceholder
+	}
+	m.refreshViewport()
+	m.viewport.GotoBottom()
 }
 
 // layout sizes the viewport and textarea to the current terminal dimensions.
@@ -341,7 +384,7 @@ func activityFromAgentLine(line string) string {
 	case strings.Contains(plain, "📝") && strings.Contains(plain, "Write"):
 		return "Writing files"
 	case strings.HasPrefix(plain, "╰─"):
-		return "Thinking"
+		return "Analyzing tool results"
 	default:
 		return ""
 	}
@@ -724,6 +767,12 @@ func (m *ChatModel) waitForAgentReady() tea.Cmd {
 	}
 }
 
+func (m *ChatModel) waitForAgentResult() tea.Cmd {
+	return func() tea.Msg {
+		return agentResultMsg{err: <-m.resultCh}
+	}
+}
+
 // nextAgentInput is called by the agent goroutine whenever it has completely
 // finished the current turn. Signalling readiness before blocking on agentIn
 // gives the Bubble Tea loop authoritative control over whether Enter submits.
@@ -768,7 +817,9 @@ func (m *ChatModel) View() string {
 
 func (m *ChatModel) renderStatusBar() string {
 	left := ""
-	if m.finished {
+	if m.failed {
+		left = chatErrorStyle.Render("● failed")
+	} else if m.finished {
 		left = chatDimStyle.Render("● stopped")
 	} else if m.busy {
 		activity := m.activity
@@ -927,7 +978,8 @@ func RunChat(a *agent.Agent) error {
 
 	// Agent goroutine.
 	go func() {
-		_ = a.Run(model.nextAgentInput)
+		runErr := a.Run(model.nextAgentInput)
+		model.resultCh <- runErr
 		wPipe.Close()
 	}()
 

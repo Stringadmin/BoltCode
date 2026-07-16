@@ -5,7 +5,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
+
+const summaryMinInnerWidth = 58
 
 // modelPricing holds per‑1K‑token costs for input and output. Prices are in
 // USD and approximate — they change periodically. The table covers common
@@ -114,6 +118,18 @@ func (s *Stats) Snapshot() (inTok, outTok, lastInput, tools, rounds int, cost fl
 	return s.InputTokens, s.OutputTokens, s.LastInput, s.ToolCalls, s.Rounds, s.TotalCost
 }
 
+func (s *Stats) ContextTokens() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.LastInput
+}
+
+func (s *Stats) SetContextTokens(tokens int) {
+	s.mu.Lock()
+	s.LastInput = tokens
+	s.mu.Unlock()
+}
+
 // Display renders a compact session summary panel.
 func (s *Stats) Display() string {
 	s.mu.Lock()
@@ -121,35 +137,56 @@ func (s *Stats) Display() string {
 	elapsed := time.Since(s.StartTime)
 	total := s.InputTokens + s.OutputTokens
 
-	var b strings.Builder
-	b.WriteString(ansiDarkGray + "  ╭" + strings.Repeat("─", 40) + "╮" + ansiReset + "\n")
-	b.WriteString(fmt.Sprintf("  %s│%s %s session summary%s%s\n",
-		ansiDarkGray, ansiReset, ansiBold+ansiWhite, strings.Repeat(" ", 22), ansiReset+ansiDarkGray+"│"+ansiReset))
-	b.WriteString(ansiDarkGray + "  ├" + strings.Repeat("─", 40) + "┤" + ansiReset + "\n")
-	b.WriteString(statRow("⏱  time", formatDuration(elapsed)))
-	b.WriteString(statRow("◆  tokens", fmt.Sprintf("%d in · %d out · %d total", s.InputTokens, s.OutputTokens, total)))
-	b.WriteString(statRow("🔄 rounds", fmt.Sprintf("%d", s.Rounds)))
-	b.WriteString(statRow("🔧 tools", fmt.Sprintf("%d", s.ToolCalls)))
+	rows := [][2]string{
+		{"⏱  time", formatDuration(elapsed)},
+		{"◆  tokens", fmt.Sprintf("%d in · %d out · %d total", s.InputTokens, s.OutputTokens, total)},
+		{"🔄 rounds", fmt.Sprintf("%d", s.Rounds)},
+		{"🔧 tools", fmt.Sprintf("%d", s.ToolCalls)},
+	}
 	if s.TotalCost > 0 {
-		b.WriteString(statRow("💰 cost", fmt.Sprintf("$%.4f", s.TotalCost)))
+		rows = append(rows, [2]string{"💰 cost", fmt.Sprintf("$%.4f", s.TotalCost)})
 	}
 	if s.cumulative != nil {
-		b.WriteString(statRow("📊 all sessions", fmt.Sprintf("%d sessions · $%.4f", s.cumulative.SessionCount, s.cumulative.TotalCost)))
+		rows = append(rows, [2]string{"📊 all sessions", fmt.Sprintf("%d sessions · $%.4f", s.cumulative.SessionCount, s.cumulative.TotalCost)})
 	}
-	b.WriteString(ansiDarkGray + "  ╰" + strings.Repeat("─", 40) + "╯" + ansiReset)
+
+	inner := summaryMinInnerWidth
+	for _, row := range rows {
+		if width := visibleWidth(" " + row[0] + "  " + row[1]); width > inner {
+			inner = width
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(ansiDarkGray + "  ╭" + strings.Repeat("─", inner) + "╮" + ansiReset + "\n")
+	b.WriteString(summaryHeader("session summary", inner))
+	b.WriteString(ansiDarkGray + "  ├" + strings.Repeat("─", inner) + "┤" + ansiReset + "\n")
+	for _, row := range rows {
+		b.WriteString(statRowWidth(row[0], row[1], inner))
+	}
+	b.WriteString(ansiDarkGray + "  ╰" + strings.Repeat("─", inner) + "╯" + ansiReset)
 	return b.String()
+}
+
+func summaryHeader(title string, inner int) string {
+	content := " " + title
+	pad := max(0, inner-visibleWidth(content))
+	return fmt.Sprintf("  %s│%s %s%s%s%s%s│%s\n",
+		ansiDarkGray, ansiReset,
+		ansiBold+ansiWhite, title, ansiReset,
+		strings.Repeat(" ", pad), ansiDarkGray, ansiReset)
 }
 
 // statRow formats one label/value line inside the summary box, right-aligned
 // padding so the panel edges line up. label is dimmed, value is bright.
 func statRow(label, value string) string {
-	const inner = 40
+	return statRowWidth(label, value, summaryMinInnerWidth)
+}
+
+func statRowWidth(label, value string, inner int) string {
 	// visible content between the borders: " " + label + "  " + value + padding
 	content := " " + label + "  " + value
-	pad := inner - visibleWidth(content)
-	if pad < 0 {
-		pad = 0
-	}
+	pad := max(0, inner-visibleWidth(content))
 	return fmt.Sprintf("  %s│%s %s%s%s  %s%s%s%s\n",
 		ansiDarkGray, ansiReset,
 		ansiGray, label, ansiReset,
@@ -157,12 +194,10 @@ func statRow(label, value string) string {
 		strings.Repeat(" ", pad)+ansiDarkGray+"│"+ansiReset)
 }
 
-// visibleWidth returns the display width of s, ignoring ANSI escape sequences.
-// Good enough for our fixed-width panel — it counts runes after stripping
-// escapes, which is accurate for the ASCII labels/values we use here.
+// visibleWidth returns terminal cell width, including correct handling for
+// ANSI escapes, CJK text, and the emoji used by the summary labels.
 func visibleWidth(s string) int {
-	cleaned := stripAnsi(s)
-	return len([]rune(cleaned))
+	return ansi.StringWidth(s)
 }
 
 func stripAnsi(s string) string {

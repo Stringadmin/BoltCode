@@ -24,7 +24,7 @@ func TestSaveAndLoadSession(t *testing.T) {
 	defer restore()
 
 	a := &Agent{
-		Config:   Config{Provider: "deepseek", Model: "deepseek-chat", BaseURL: "https://api.deepseek.com/v1"},
+		Config:   Config{Provider: "deepseek", Model: "deepseek-chat", BaseURL: "https://api.deepseek.com/v1", ContextWindow: 256_000},
 		Workdir:  "/some/dir",
 		RepoRoot: "/some",
 		Intent:   "fix the bug",
@@ -57,6 +57,9 @@ func TestSaveAndLoadSession(t *testing.T) {
 	}
 	if loaded.Model != "deepseek-chat" || loaded.Provider != "deepseek" || loaded.BaseURL != "https://api.deepseek.com/v1" {
 		t.Errorf("loaded protocol config = provider %q, model %q, base URL %q", loaded.Provider, loaded.Model, loaded.BaseURL)
+	}
+	if loaded.ContextWindow != 256_000 {
+		t.Errorf("loaded context window = %d", loaded.ContextWindow)
 	}
 	if len(loaded.Messages) != 2 {
 		t.Errorf("loaded %d messages, want 2", len(loaded.Messages))

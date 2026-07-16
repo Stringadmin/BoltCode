@@ -155,18 +155,24 @@ func RunChat(a *agent.Agent) error {
 	// exact handle and uses its UTF-16 coninput reader. WithInputTTY opens a
 	// second CONIN$ handle, bypasses coninput, and leaks physical pinyin keys
 	// plus code-page-garbled IME commits through the ANSI reader.
-	options := []tea.ProgramOption{tea.WithAltScreen(), tea.WithOutput(realStdout)}
+	options := []tea.ProgramOption{
+		tea.WithAltScreen(),
+		tea.WithOutput(realStdout),
+		tea.WithMouseCellMotion(),
+	}
 	_, runErr := tea.NewProgram(model, options...).Run()
 
 	a.Cancel()
 	close(model.agentIn)
-	select {
-	case <-model.agentDone:
-	case <-time.After(3 * time.Second):
-	}
+	// Do not restore the agent's classic terminal mode while its goroutine is
+	// still unwinding. The old timeout allowed a slow tool to outlive the TUI,
+	// after which it printed the classic summary and session footer over the
+	// shell's commit prompt. Agent operations use the session context, so cancel
+	// first and then make the hand-off back to the shell strictly synchronous.
+	<-model.agentDone
+	_ = writer.Close()
 	os.Stdout = realStdout
-	writer.Close()
-	reader.Close()
+	_ = reader.Close()
 	return runErr
 }
 

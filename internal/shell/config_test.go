@@ -143,7 +143,7 @@ func TestRunConfigPasswordKeepsFollowingInputIntact(t *testing.T) {
 	// The model deliberately contains b/d/f. On Windows these letters were
 	// previously interpreted as editing commands after term.ReadPassword raced
 	// with readline for console events.
-	input := "test-profile\n4\nsk-dfb-secret\ndfb-model\n\n\n"
+	input := "test-profile\n4\nsk-dfb-secret\ndfb-model\n\n256k\n\n"
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt: mainPrompt,
 		Stdin:  io.NopCloser(strings.NewReader(input)),
@@ -168,5 +168,8 @@ func TestRunConfigPasswordKeepsFollowingInputIntact(t *testing.T) {
 	p := profiles[0]
 	if p.Provider != "deepseek" || p.APIKey != "sk-dfb-secret" || p.Model != "dfb-model" {
 		t.Fatalf("saved input was corrupted: %+v", p)
+	}
+	if p.ContextWindow != 256_000 {
+		t.Fatalf("context window = %d, want 256000", p.ContextWindow)
 	}
 }

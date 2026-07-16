@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +198,17 @@ func TestStatusShowsContextCostAndPlan(t *testing.T) {
 	}
 }
 
+func TestModelPopupIncludesCurrentCustomModel(t *testing.T) {
+	m := NewChat(&agent.Agent{Config: agent.Config{Provider: "deepseek", Model: "deepseek-v4-pro", BaseURL: "https://api.deepseek.com/v1"}})
+	m.showModelPopup()
+	if m.popup == nil || len(m.popup.items) == 0 {
+		t.Fatal("model popup is empty")
+	}
+	if m.popup.items[0].id != "deepseek-v4-pro" || !strings.Contains(m.popup.items[0].desc, "current") {
+		t.Fatalf("custom current model missing from popup: %+v", m.popup.items)
+	}
+}
+
 func TestCtrlCInterruptsBusyActionBeforeQuitting(t *testing.T) {
 	a := &agent.Agent{Config: agent.Config{Model: "test-model"}}
 	m := NewChat(a)
@@ -291,9 +303,45 @@ func TestInputReservesSecondRowForWindowsIME(t *testing.T) {
 	if lines := strings.Count(m.textarea.View(), "\n") + 1; lines < chatInputRows {
 		t.Fatalf("textarea rows = %d, want at least %d", lines, chatInputRows)
 	}
-	wantViewportHeight := m.height - (chatInputRows + 2) - 2
+	wantViewportHeight := m.height - (chatInputRows + 2) - 2 - 1
 	if m.viewport.Height != wantViewportHeight {
 		t.Fatalf("viewport height = %d, want %d", m.viewport.Height, wantViewportHeight)
+	}
+}
+
+func TestMouseWheelScrollsConversationViewport(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 80
+	m.height = 20
+	m.layout()
+	var lines []string
+	for i := 0; i < 80; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	m.viewport.SetContent(strings.Join(lines, "\n"))
+	m.viewport.GotoBottom()
+	before := m.viewport.YOffset
+	m.Update(tea.MouseMsg{Type: tea.MouseWheelUp, Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	if m.viewport.YOffset >= before {
+		t.Fatalf("wheel up did not scroll: before=%d after=%d", before, m.viewport.YOffset)
+	}
+	m.Update(tea.MouseMsg{Type: tea.MouseWheelDown, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	if m.viewport.YOffset != before {
+		t.Fatalf("wheel down did not restore offset: before=%d after=%d", before, m.viewport.YOffset)
+	}
+}
+
+func TestChatViewHasFixedHeaderAndStatefulInputBorder(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 24
+	m.layout()
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "⚡ BoltCode") || !strings.Contains(view, "working") || !strings.Contains(view, "↕ 100%") {
+		t.Fatalf("session header missing:\n%s", view)
+	}
+	if got := ansi.StringWidth(m.renderSessionHeader()); got != m.width {
+		t.Fatalf("header width = %d, want %d", got, m.width)
 	}
 }
 

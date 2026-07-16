@@ -3,7 +3,6 @@ package agent
 import (
 	"fmt"
 	"io/fs"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -137,7 +136,7 @@ func (a *Agent) handleSlashCommand(input string) bool {
 			return true
 		}
 		if a.Stats != nil {
-			a.Stats.LastInput = estimateTokens(a.Messages)
+			a.Stats.SetContextTokens(estimateTokens(a.Messages))
 		}
 		fmt.Println("  " + ansiGreen + "✓ context compacted" + ansiReset)
 		return true
@@ -169,7 +168,7 @@ func (a *Agent) handleSlashCommand(input string) bool {
 // showContext displays the current context-usage bar and window size, so the
 // user can see how close they are to the model's limit.
 func (a *Agent) showContext() bool {
-	window := modelContextWindow(a.Config.Model)
+	window := a.ContextWindow()
 	used := a.currentContextTokens()
 	fmt.Println()
 	fmt.Printf("  %scontext usage:%s %s\n", ansiBold, ansiReset, a.Config.Model)
@@ -340,7 +339,7 @@ func (a *Agent) slashCommandPicker() bool {
 // current provider. The user selects by number. Triggered when the user types
 // "/model" without arguments.
 func (a *Agent) modelPicker() bool {
-	models := modelsForProvider(a.Config.Provider)
+	models := AvailableModels(a.Config)
 	if len(models) == 0 {
 		// Unknown provider — fall back to free-text input.
 		fmt.Printf("\n  "+ansiGray+"current model: %s"+ansiReset+"\n", a.Config.Model)
@@ -369,7 +368,7 @@ func (a *Agent) modelPicker() bool {
 		menu += fmt.Sprintf("  %s%d) %-30s %s%s%s\n",
 			marker, i+1, m.ID, ansiGray, label, ansiReset)
 	}
-	menu += fmt.Sprintf("\n  %s[1-%d] switch  [q] quit > %s",
+	menu += fmt.Sprintf("\n  %s[1-%d] switch · or enter a model id  [q] quit > %s",
 		ansiDarkGray, len(models), ansiReset)
 
 	choice := strings.TrimSpace(a.readWith(menu))
@@ -377,11 +376,14 @@ func (a *Agent) modelPicker() bool {
 		return true
 	}
 	n, err := parseNumber(choice)
-	if err != nil || n < 1 || n > len(models) {
-		fmt.Println("  " + ansiRed + "invalid choice" + ansiReset)
-		return true
+	selected := choice
+	if err == nil {
+		if n < 1 || n > len(models) {
+			fmt.Println("  " + ansiRed + "invalid choice" + ansiReset)
+			return true
+		}
+		selected = models[n-1].ID
 	}
-	selected := models[n-1].ID
 	a.Config.Model = selected
 	if err := SetCurrentModel(selected); err != nil {
 		fmt.Printf("  "+ansiYellow+"⚠ saved for this session only: %v"+ansiReset+"\n", err)
@@ -442,8 +444,14 @@ func (a *Agent) createNewProfile() bool {
 		model = DefaultModel
 	}
 	baseURL := strings.TrimSpace(a.readWith("  base URL (blank=default): "))
+	contextRaw := strings.TrimSpace(a.readWith("  context window (e.g. 128k, blank=auto): "))
+	contextWindow, parseErr := ParseContextWindow(contextRaw)
+	if parseErr != nil {
+		fmt.Println("  " + ansiRed + parseErr.Error() + ansiReset)
+		return false
+	}
 
-	cfg := &Config{Provider: provider, APIKey: apiKey, Model: model, BaseURL: baseURL}
+	cfg := &Config{Provider: provider, APIKey: apiKey, Model: model, BaseURL: baseURL, ContextWindow: contextWindow}
 	if err := SaveProfile(name, cfg); err != nil {
 		fmt.Printf("  "+ansiRed+"✗ save failed: %v"+ansiReset+"\n", err)
 		return false
@@ -489,15 +497,11 @@ func (a *Agent) switchProfile(name string) bool {
 
 // showDiff runs git diff in the worktree and displays the result.
 func (a *Agent) showDiff() {
-	cmd := exec.Command("git", "diff", "--stat")
-	cmd.Dir = a.Workdir
-	out, _ := cmd.CombinedOutput()
+	out, _ := a.runGit("diff", "--stat")
 	result := strings.TrimSpace(string(out))
 	if result == "" {
 		// Also check untracked files
-		cmd2 := exec.Command("git", "status", "--short")
-		cmd2.Dir = a.Workdir
-		out2, _ := cmd2.CombinedOutput()
+		out2, _ := a.runGit("status", "--short")
 		result = strings.TrimSpace(string(out2))
 	}
 	if result == "" {

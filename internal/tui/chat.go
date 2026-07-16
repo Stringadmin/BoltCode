@@ -26,6 +26,7 @@ var (
 	chatErrorStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
 	chatPromptStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 	chatTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
+	chatHeaderStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("24")).Bold(true)
 	statusBarStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(lipgloss.Color("236"))
 	inputBoxStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
 	popupStyle         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(0, 2)
@@ -230,6 +231,17 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m, nil
 
+	case tea.MouseMsg:
+		// The viewport owns wheel events. Bubble Tea only emits MouseMsg after
+		// the runtime enables mouse cell motion; don't pass wheel input to the
+		// textarea or it will look like the input box is swallowing scrolling.
+		if m.popup == nil && (msg.Type == tea.MouseWheelUp || msg.Type == tea.MouseWheelDown || msg.Type == tea.MouseWheelLeft || msg.Type == tea.MouseWheelRight) {
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 
@@ -397,13 +409,16 @@ func (m *ChatModel) layout() {
 		return
 	}
 	inputH := chatInputRows + 2 // textarea rows + top/bottom border
-	statusH := 2                // primary status + session metrics
-	vpH := m.height - inputH - statusH
+	headerH := 1
+	statusH := 2 // primary status + session metrics
+	vpH := m.height - inputH - statusH - headerH
 	if vpH < 3 {
 		vpH = 3
 	}
 	if !m.ready {
 		m.viewport = viewport.New(m.width, vpH)
+		m.viewport.MouseWheelEnabled = true
+		m.viewport.MouseWheelDelta = 4
 		m.ready = true
 	} else {
 		m.viewport.Width = m.width
@@ -712,10 +727,50 @@ func (m *ChatModel) View() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
+		m.renderSessionHeader(),
 		m.viewport.View(),
 		m.renderStatusBar(),
-		inputBoxStyle.Render(m.textarea.View()),
+		m.renderInputBox(),
 	)
+}
+
+func (m *ChatModel) renderSessionHeader() string {
+	state := "ready"
+	if m.failed {
+		state = "failed"
+	} else if m.finished {
+		state = "stopped"
+	} else if m.recovering {
+		state = "recovery"
+	} else if m.busy {
+		state = "working"
+	}
+	workspace := filepath.Base(filepath.Clean(m.agent.Workdir))
+	if workspace == "" || workspace == "." {
+		workspace = "workspace"
+	}
+	scroll := 100
+	if m.ready && !m.viewport.AtBottom() {
+		scroll = int(m.viewport.ScrollPercent() * 100)
+	}
+	content := fmt.Sprintf(" ⚡ BoltCode  ·  %s  ·  %s  ·  %s  ·  ↕ %d%% ", workspace, m.model, state, scroll)
+	if ansi.StringWidth(content) > m.width {
+		content = ansi.Truncate(content, m.width, "…")
+	}
+	return chatHeaderStyle.Width(m.width).Render(content)
+}
+
+func (m *ChatModel) renderInputBox() string {
+	style := inputBoxStyle
+	switch {
+	case m.failed || m.recovering:
+		style = style.BorderForeground(lipgloss.Color("196"))
+	case m.busy:
+		style = style.BorderForeground(lipgloss.Color("75"))
+	default:
+		style = style.BorderForeground(lipgloss.Color("78"))
+	}
+	return style.Render(m.textarea.View())
 }
 
 func (m *ChatModel) renderStatusBar() string {
@@ -752,7 +807,7 @@ func (m *ChatModel) renderStatusBar() string {
 	right := chatDimStyle.Render(fmt.Sprintf("%s · %s · scroll %d%%", m.model, permission, scroll))
 	primary := fitStatusLine(left+"  │  "+right, m.width)
 
-	window := agent.ModelContextWindow(m.model)
+	window := m.agent.ContextWindow()
 	contextPct := 0
 	if window > 0 {
 		contextPct = int(float64(m.contextTokens) / float64(window) * 100)
@@ -764,7 +819,7 @@ func (m *ChatModel) renderStatusBar() string {
 			plan += " · " + m.planCurrent
 		}
 	}
-	secondary := fmt.Sprintf("context %d%% · %s/%s  │  %s  │  $%.4f  │  %d tools · %d rounds  │  %s/%s in/out  │  Ctrl+O details",
+	secondary := fmt.Sprintf("context %d%% · %s/%s  │  %s  │  $%.4f  │  %d tools · %d rounds  │  %s/%s in/out  │  wheel/PgUp scroll · Ctrl+O details",
 		contextPct, formatMetricTokens(m.contextTokens), formatMetricTokens(window), plan, m.cost, m.tools, m.rounds,
 		formatMetricTokens(m.inputTokens), formatMetricTokens(m.outputTokens))
 	secondary = fitStatusLine(chatDimStyle.Render(secondary), m.width)

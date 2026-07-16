@@ -23,6 +23,12 @@ import (
 // typical build/test commands while still bounding the worst case.
 const commandTimeout = 10 * time.Minute
 
+// gitCommandTimeout bounds built-in git tools separately from arbitrary shell
+// commands. More importantly, runGit ties them to the agent session context so
+// leaving the TUI cannot leave a git child process (and the agent goroutine)
+// behind.
+const gitCommandTimeout = 2 * time.Minute
+
 // secretEnvVars are env-var names known to carry LLM/BoltCode credentials.
 // They are stripped from the environment of every run_command subprocess so an
 // AI-spawned command (or a compromised dependency) can't exfiltrate the user's
@@ -506,10 +512,7 @@ func stripHTML(s string) string {
 
 func (a *Agent) toolGitStatus() (string, bool) {
 	// Use git directly in the workdir.
-	cmd := exec.Command("git", "status", "--short")
-	cmd.Dir = a.Workdir
-	cmd.Env = gitEnv()
-	out, err := cmd.CombinedOutput()
+	out, err := a.runGit("status", "--short")
 	if err != nil {
 		return fmt.Sprintf("git status failed: %v\n%s", err, strings.TrimSpace(string(out))), true
 	}
@@ -529,10 +532,7 @@ func (a *Agent) toolGitDiff(path string) (string, bool) {
 		}
 		args = append(args, "--", full)
 	}
-	cmd := exec.Command("git", args...)
-	cmd.Dir = a.Workdir
-	cmd.Env = gitEnv()
-	out, err := cmd.CombinedOutput()
+	out, err := a.runGit(args...)
 	if err != nil {
 		return fmt.Sprintf("git diff failed: %v\n%s", err, strings.TrimSpace(string(out))), true
 	}
@@ -551,21 +551,29 @@ func (a *Agent) toolGitCommit(message string) (string, bool) {
 		return "commit message is required", true
 	}
 	// Stage all.
-	cmd := exec.Command("git", "add", "-A")
-	cmd.Dir = a.Workdir
-	cmd.Env = gitEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := a.runGit("add", "-A"); err != nil {
 		return fmt.Sprintf("git add failed: %v\n%s", err, strings.TrimSpace(string(out))), true
 	}
 	// Commit.
-	cmd = exec.Command("git", "commit", "-m", message)
-	cmd.Dir = a.Workdir
-	cmd.Env = gitEnv()
-	out, err := cmd.CombinedOutput()
+	out, err := a.runGit("commit", "-m", message)
 	if err != nil {
 		return fmt.Sprintf("git commit failed: %v\n%s", err, strings.TrimSpace(string(out))), true
 	}
 	return strings.TrimSpace(string(out)), false
+}
+
+func (a *Agent) runGit(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(a.context(), gitCommandTimeout)
+	a.setCurrentCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearCurrentCancel()
+	}()
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = a.Workdir
+	cmd.Env = gitEnv()
+	return cmd.CombinedOutput()
 }
 
 // gitEnv returns a clean environment for git subprocesses with

@@ -21,7 +21,7 @@ func (m *ChatModel) showCommandPopup() (tea.Model, tea.Cmd) {
 }
 
 func (m *ChatModel) showModelPopup() (tea.Model, tea.Cmd) {
-	models := agent.ModelsForProvider(m.agent.Config.Provider)
+	models := agent.AvailableModels(m.agent.Config)
 	if len(models) == 0 {
 		m.lines = append(m.lines, chatDimStyle.Render("  no model list for provider: "+m.agent.Config.Provider))
 		m.logDirty = true

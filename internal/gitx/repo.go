@@ -9,11 +9,17 @@ package gitx
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
+
+// ErrInterrupted identifies a git child process stopped by Ctrl+C. Callers can
+// present this as a cancellation rather than dumping incidental stderr (for
+// example Windows line-ending warnings) as though the commit itself failed.
+var ErrInterrupted = errors.New("git operation interrupted")
 
 // Repo is a handle to a git repository rooted at Root (the main worktree).
 type Repo struct {
@@ -67,8 +73,23 @@ func runIn(dir string, args ...string) (string, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
+		if isGitInterrupt(err) {
+			return "", fmt.Errorf("%w: git %s", ErrInterrupted, strings.Join(args, " "))
+		}
 		return "", fmt.Errorf("git %s: %w: %s",
 			strings.Join(args, " "), err, strings.TrimSpace(errBuf.String()))
 	}
 	return strings.TrimSpace(out.String()), nil
+}
+
+type exitCoder interface {
+	ExitCode() int
+}
+
+func isGitInterrupt(err error) bool {
+	var exitErr exitCoder
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 130 {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "signal: interrupt")
 }

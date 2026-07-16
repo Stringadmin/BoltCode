@@ -161,3 +161,21 @@ func TestStatsDisplayContainsAllMetrics(t *testing.T) {
 		t.Errorf("Display should include cost for known model, got: %q", out)
 	}
 }
+
+func TestStatsDisplayAlignsLargeTokenCounts(t *testing.T) {
+	s := NewStats()
+	s.InputTokens = 764805
+	s.OutputTokens = 5629
+	s.Rounds = 13
+	s.ToolCalls = 55
+	s.TotalCost = 2.3789
+	s.SetCumulative(&CumulativeUsage{SessionCount: 5, TotalCost: 2.7126})
+
+	lines := strings.Split(s.Display(), "\n")
+	wantWidth := visibleWidth(lines[0])
+	for i, line := range lines[1:] {
+		if got := visibleWidth(line); got != wantWidth {
+			t.Errorf("line %d width = %d, want %d: %q", i+2, got, wantWidth, stripAnsi(line))
+		}
+	}
+}

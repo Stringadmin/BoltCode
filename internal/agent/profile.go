@@ -91,7 +91,7 @@ func LoadProfiles() (*ProfileFile, error) {
 		return &ProfileFile{
 			Profiles: []Profile{{
 				Name: name, Provider: legacy.Provider,
-				APIKey: legacy.APIKey, Model: legacy.Model, BaseURL: legacy.BaseURL,
+				APIKey: legacy.APIKey, Model: legacy.Model, BaseURL: legacy.BaseURL, ContextWindow: legacy.ContextWindow,
 			}},
 			Current: name,
 		}, nil
@@ -151,7 +151,7 @@ func SaveProfile(name string, cfg *Config) error {
 		}
 		p := Profile{
 			Name: name, Provider: cfg.Provider,
-			APIKey: cfg.APIKey, Model: cfg.Model, BaseURL: cfg.BaseURL,
+			APIKey: cfg.APIKey, Model: cfg.Model, BaseURL: cfg.BaseURL, ContextWindow: cfg.ContextWindow,
 		}
 		found := false
 		for i := range pf.Profiles {

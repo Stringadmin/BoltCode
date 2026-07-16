@@ -17,10 +17,25 @@ import (
 // detailed history for a condensed summary so the conversation can continue
 // without hitting the token limit.
 func (a *Agent) compactMessages(keepRecent int) error {
-	if len(a.Messages) <= keepRecent+2 {
+	if len(a.Messages) < 2 {
 		return nil // nothing to compact
 	}
+	if keepRecent >= len(a.Messages) {
+		keepRecent = len(a.Messages) - 1
+	}
+	if keepRecent < 1 {
+		keepRecent = 1
+	}
 	split := len(a.Messages) - keepRecent
+	// Never cut between an assistant tool_use message and its required user
+	// tool_result message; doing so creates an invalid history on the next API
+	// request even though both messages existed before compaction.
+	if split > 0 && split < len(a.Messages) && messageHasToolResults(a.Messages[split]) {
+		split--
+		if split == 0 {
+			split = len(a.Messages)
+		}
+	}
 	older := a.Messages[:split]
 	recent := a.Messages[split:]
 
@@ -34,19 +49,29 @@ func (a *Agent) compactMessages(keepRecent int) error {
 		summary = fallbackSummary(older)
 	}
 
-	// Rebuild: original first message (project context) + summary + recent.
-	var rebuilt []Message
-	if len(a.Messages) > 0 {
-		rebuilt = append(rebuilt, a.Messages[0])
-	}
-	rebuilt = append(rebuilt, Message{
+	// Rebuild around the summary plus recent turns. The original first message
+	// can contain a very large project scan; preserving it verbatim defeated
+	// compaction and caused the next API call to overflow again.
+	rebuilt := []Message{{
 		Role: "user",
 		Content: "[Context summary — earlier conversation was compacted to save space]\n" + summary +
 			"\n[End summary. The recent messages below continue from here.]",
-	})
+	}}
 	rebuilt = append(rebuilt, recent...)
 	a.Messages = rebuilt
 	return nil
+}
+
+func messageHasToolResults(message Message) bool {
+	if message.Role != "user" {
+		return false
+	}
+	for _, block := range messageContentBlocks(message.Content) {
+		if kind, _ := block["type"].(string); kind == "tool_result" {
+			return true
+		}
+	}
+	return false
 }
 
 // summarizeHistory asks the LLM to produce a concise summary of the given

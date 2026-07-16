@@ -42,6 +42,35 @@ func TestModelContextWindowEnvOverride(t *testing.T) {
 	}
 }
 
+func TestConfiguredContextWindowOverridesModelInference(t *testing.T) {
+	a := &Agent{Config: Config{Model: "unknown-custom-model", ContextWindow: 512_000}}
+	if got := a.ContextWindow(); got != 512_000 {
+		t.Fatalf("context window = %d, want 512000", got)
+	}
+}
+
+func TestParseContextWindow(t *testing.T) {
+	tests := map[string]int{
+		"128k":    128_000,
+		"200000":  200_000,
+		"1m":      1_000_000,
+		"256_000": 256_000,
+		"auto":    0,
+		"-":       0,
+	}
+	for input, want := range tests {
+		got, err := ParseContextWindow(input)
+		if err != nil || got != want {
+			t.Errorf("ParseContextWindow(%q) = %d, %v; want %d", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"abc", "2k", "20m"} {
+		if _, err := ParseContextWindow(input); err == nil {
+			t.Errorf("ParseContextWindow(%q) should fail", input)
+		}
+	}
+}
+
 func TestShouldCompact(t *testing.T) {
 	window := 100_000
 	if shouldCompact(50_000, window) {

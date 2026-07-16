@@ -158,7 +158,7 @@ func (a *Agent) Run(inputFn func() string) error {
 		}
 		// Auto-compact if the resumed session is large enough to risk
 		// overflowing the context window on the first API call.
-		window := modelContextWindow(a.Config.Model)
+		window := a.ContextWindow()
 		est := estimateTokens(a.Messages)
 		if est > 0 && shouldCompact(est, window) {
 			fmt.Printf("  "+ansiYellow+"⚡ context ~%s — compacting before resume..."+ansiReset+"\n",
@@ -212,6 +212,11 @@ func (a *Agent) Run(inputFn func() string) error {
 			}
 			a.Messages = append(a.Messages, Message{Role: "user", Content: input})
 			continue
+		}
+		window := a.ContextWindow()
+		if current := a.currentContextTokens(); shouldCompact(current, window) {
+			a.emitPhase("Compacting context")
+			a.autoCompact(current)
 		}
 		// Show spinner while waiting for API
 		var spin *Spinner
@@ -276,9 +281,9 @@ func (a *Agent) Run(inputFn func() string) error {
 		if len(toolCalls) == 0 {
 			// AI finished speaking — auto-compact if context is near the window,
 			// then show a session footer with stats + a context-usage bar.
-			window := modelContextWindow(a.Config.Model)
-			if shouldCompact(a.Stats.LastInput, window) {
-				a.autoCompact()
+			window := a.ContextWindow()
+			if current := a.currentContextTokens(); shouldCompact(current, window) {
+				a.autoCompact(current)
 			}
 
 			// In TUI mode the status bar shows tokens/tools/rounds/context, so
@@ -488,8 +493,10 @@ func composeInitialUserMessage(contextParts []string, input string) string {
 // currentContextTokens returns the best estimate of current context size: the
 // last API response's input_tokens if available, else a heuristic estimate.
 func (a *Agent) currentContextTokens() int {
-	if a.Stats != nil && a.Stats.LastInput > 0 {
-		return a.Stats.LastInput
+	if a.Stats != nil {
+		if current := a.Stats.ContextTokens(); current > 0 {
+			return current
+		}
 	}
 	return estimateTokens(a.Messages)
 }
@@ -519,20 +526,24 @@ func (a *Agent) todoProgressLine() string {
 
 // autoCompact summarizes the older conversation history to reclaim context.
 // Announces itself so the user sees why the conversation just got shorter.
-func (a *Agent) autoCompact() {
-	window := modelContextWindow(a.Config.Model)
+func (a *Agent) autoCompact(used int) {
+	window := a.ContextWindow()
+	if used <= 0 {
+		used = estimateTokens(a.Messages)
+	}
 	fmt.Println()
 	fmt.Printf("  "+ansiYellow+"⚡ context at %d%% — compacting..."+ansiReset+"\n",
-		int(float64(a.Stats.LastInput)/float64(window)*100))
+		int(float64(used)/float64(window)*100))
 	if err := a.compactMessages(6); err != nil {
 		fmt.Printf("  "+ansiRed+"✗ compaction failed: %v"+ansiReset+"\n", err)
 		return
 	}
 	// Reset LastInput to the estimate of the now-smaller history so the bar
 	// reflects reality until the next API call refreshes it.
-	a.Stats.LastInput = estimateTokens(a.Messages)
+	compactedTokens := estimateTokens(a.Messages)
+	a.Stats.SetContextTokens(compactedTokens)
 	fmt.Printf("  "+ansiGreen+"✓ compacted — context now ~%s tokens"+ansiReset+"\n",
-		formatTokens(a.Stats.LastInput))
+		formatTokens(compactedTokens))
 	fmt.Print("  \033[38;5;75m❯\033[0m\n")
 }
 

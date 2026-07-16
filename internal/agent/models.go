@@ -54,6 +54,58 @@ func ModelsForProvider(provider string) []ModelOption {
 	return modelsForProvider(provider)
 }
 
+// AvailableModels merges the active model and models saved in compatible
+// profiles with BoltCode's built-in catalog. The current model is placed first
+// so a custom id never disappears from /model just because it isn't compiled
+// into providerModels.
+func AvailableModels(config Config) []ModelOption {
+	var models []ModelOption
+	seen := make(map[string]bool)
+	builtInLabels := make(map[string]string)
+	for _, option := range modelsForProvider(config.Provider) {
+		builtInLabels[strings.ToLower(option.ID)] = option.Label
+	}
+	add := func(id, label string) {
+		id = strings.TrimSpace(id)
+		key := strings.ToLower(id)
+		if id == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		models = append(models, ModelOption{ID: id, Label: label})
+	}
+
+	currentLabel := builtInLabels[strings.ToLower(config.Model)]
+	if currentLabel == "" && strings.TrimSpace(config.Model) != "" {
+		currentLabel = "Configured model · current"
+	}
+	add(config.Model, currentLabel)
+
+	if profiles, err := LoadProfiles(); err == nil && profiles != nil {
+		for _, profile := range profiles.Profiles {
+			if !strings.EqualFold(profile.Provider, config.Provider) || !sameModelEndpoint(profile.BaseURL, config.BaseURL) {
+				continue
+			}
+			label := builtInLabels[strings.ToLower(profile.Model)]
+			if label == "" {
+				label = "Configured · " + profile.Name
+			}
+			add(profile.Model, label)
+		}
+	}
+	for _, option := range modelsForProvider(config.Provider) {
+		add(option.ID, option.Label)
+	}
+	return models
+}
+
+func sameModelEndpoint(left, right string) bool {
+	normalize := func(value string) string {
+		return strings.TrimRight(strings.ToLower(strings.TrimSpace(value)), "/")
+	}
+	return normalize(left) == normalize(right)
+}
+
 // modelsForProvider returns the model list for a provider, or nil if unknown.
 func modelsForProvider(provider string) []ModelOption {
 	p := strings.ToLower(strings.TrimSpace(provider))

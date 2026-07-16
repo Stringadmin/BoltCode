@@ -52,6 +52,65 @@ func ModelContextWindow(model string) int {
 	return modelContextWindow(model)
 }
 
+// ContextWindow resolves the active agent's effective limit. A per-profile
+// value wins; otherwise BoltCode falls back to the environment override and
+// built-in model heuristics for backwards compatibility.
+func (a *Agent) ContextWindow() int {
+	if a != nil && a.Config.ContextWindow > 0 {
+		return a.Config.ContextWindow
+	}
+	if a == nil {
+		return modelContextWindow("")
+	}
+	return modelContextWindow(a.Config.Model)
+}
+
+// ParseContextWindow accepts user-friendly values such as 128k, 200000, 1m,
+// or "auto"/"-" (zero, meaning model inference). Values below 4k are rejected
+// because they are almost certainly a unit mistake.
+func ParseContextWindow(value string) (int, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.NewReplacer(",", "", "_", "", " ", "").Replace(value)
+	if value == "" || value == "-" || value == "auto" || value == "default" {
+		return 0, nil
+	}
+	multiplier := float64(1)
+	switch {
+	case strings.HasSuffix(value, "k"):
+		multiplier = 1_000
+		value = strings.TrimSuffix(value, "k")
+	case strings.HasSuffix(value, "m"):
+		multiplier = 1_000_000
+		value = strings.TrimSuffix(value, "m")
+	}
+	number, err := strconv.ParseFloat(value, 64)
+	if err != nil || number <= 0 {
+		return 0, fmt.Errorf("上下文大小格式无效，请输入 128k、200000 或 1m")
+	}
+	window := int(number * multiplier)
+	if window < 4_096 {
+		return 0, fmt.Errorf("上下文大小不能小于 4k tokens")
+	}
+	if window > 10_000_000 {
+		return 0, fmt.Errorf("上下文大小不能超过 10m tokens")
+	}
+	return window, nil
+}
+
+// FormatContextWindow renders a configured token limit compactly.
+func FormatContextWindow(window int) string {
+	if window <= 0 {
+		return "auto"
+	}
+	if window%1_000_000 == 0 {
+		return fmt.Sprintf("%dm", window/1_000_000)
+	}
+	if window%1_000 == 0 {
+		return fmt.Sprintf("%dk", window/1_000)
+	}
+	return fmt.Sprintf("%d", window)
+}
+
 // compactThreshold is the fraction of the context window at which auto-compact
 // kicks in. 0.8 = compact when usage reaches 80%.
 const compactThreshold = 0.8

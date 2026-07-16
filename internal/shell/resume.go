@@ -71,6 +71,9 @@ func startResumedAgent(version string, s *agent.Session) error {
 	if s.Model != "" {
 		a.Config.Model = s.Model
 	}
+	if s.ContextWindow > 0 {
+		a.Config.ContextWindow = s.ContextWindow
+	}
 
 	return tui.RunChat(a)
 }

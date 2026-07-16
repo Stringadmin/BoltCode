@@ -380,7 +380,11 @@ func (s *Session) runConfig(args []string) {
 				marker = "●"
 			}
 			fmt.Printf("  %s [%d] %s\n", marker, i+1, p.Name)
-			fmt.Println(infoStyle.Render(fmt.Sprintf("        %s · %s", providerDisplay(p.Provider), p.Model)))
+			window := p.ContextWindow
+			if window <= 0 {
+				window = agent.ModelContextWindow(p.Model)
+			}
+			fmt.Println(infoStyle.Render(fmt.Sprintf("        %s · %s · context %s", providerDisplay(p.Provider), p.Model, agent.FormatContextWindow(window))))
 		}
 		fmt.Println()
 	} else {
@@ -447,11 +451,11 @@ func (s *Session) runConfig(args []string) {
 	}
 	fmt.Println()
 	fmt.Println(okStyle.Render(fmt.Sprintf("  ✓ 档案 %q 已保存并设为当前", name)))
-	fmt.Println(infoStyle.Render(fmt.Sprintf("  %s · %s", providerDisplay(cfg.Provider), cfg.Model)))
+	fmt.Println(infoStyle.Render(fmt.Sprintf("  %s · %s · context %s", providerDisplay(cfg.Provider), cfg.Model, agent.FormatContextWindow(cfg.ContextWindow))))
 	fmt.Println(infoStyle.Render("  接下来可运行 run，或在会话中用 /profile 切换档案"))
 }
 
-// editProfileFields runs the navigable 4-field form for one profile, pre-filled
+// editProfileFields runs the navigable 5-field form for one profile, pre-filled
 // from prefill. Returns the completed config and ok=true on save, ok=false on
 // cancel.
 func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.Config, bool) {
@@ -467,12 +471,14 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 		model = agent.DefaultModel
 	}
 	baseURL := prefill.BaseURL
+	contextWindow := prefill.ContextWindow
 
 	const (
 		stepProvider = iota
 		stepAPIKey
 		stepModel
 		stepBaseURL
+		stepContextWindow
 		stepConfirm
 	)
 	step := stepProvider
@@ -480,7 +486,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 	for {
 		switch step {
 		case stepProvider:
-			renderConfigStep(1, 4, "选择服务商")
+			renderConfigStep(1, 5, "选择服务商")
 			for i, p := range agent.KnownProviders {
 				marker := " "
 				if strings.EqualFold(provider, p.ID) {
@@ -507,6 +513,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 				if !strings.EqualFold(provider, picked.ID) {
 					provider = picked.ID
 					baseURL = picked.BaseURL
+					contextWindow = 0
 					options := agent.ModelsForProvider(provider)
 					if len(options) > 0 {
 						model = options[0].ID
@@ -518,7 +525,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			step = stepAPIKey
 
 		case stepAPIKey:
-			renderConfigStep(2, 4, "配置 API Key")
+			renderConfigStep(2, 5, "配置 API Key")
 			shown := "未设置"
 			if apiKey != "" {
 				shown = "已设置 " + maskKey(apiKey)
@@ -542,8 +549,8 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			step = stepModel
 
 		case stepModel:
-			renderConfigStep(3, 4, "选择模型")
-			models := agent.ModelsForProvider(provider)
+			renderConfigStep(3, 5, "选择模型")
+			models := agent.AvailableModels(agent.Config{Provider: provider, BaseURL: baseURL, Model: model})
 			for i, option := range models {
 				marker := " "
 				if option.ID == model {
@@ -583,7 +590,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			step = stepBaseURL
 
 		case stepBaseURL:
-			renderConfigStep(4, 4, "确认 API 地址")
+			renderConfigStep(4, 5, "确认 API 地址")
 			defaultURL := providerDefaultURL(provider)
 			shown := orDefault(baseURL, "服务商默认")
 			if providerRequiresBaseURL(provider) {
@@ -613,6 +620,34 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 				fmt.Println(errStyle.Render("  " + err.Error()))
 				continue
 			}
+			step = stepContextWindow
+
+		case stepContextWindow:
+			renderConfigStep(5, 5, "配置上下文窗口")
+			effective := contextWindow
+			shown := agent.FormatContextWindow(contextWindow)
+			if effective <= 0 {
+				effective = agent.ModelContextWindow(model)
+				shown = fmt.Sprintf("auto (%s)", agent.FormatContextWindow(effective))
+			}
+			fmt.Println(infoStyle.Render("  用于状态栏和自动压缩判断；达到 80% 时自动总结旧对话"))
+			fmt.Println(infoStyle.Render("  支持 128k、200000、1m；输入 - 恢复自动推断"))
+			in, back, cancel := s.askWithBack(fmt.Sprintf("  Context Window [%s]: ", shown))
+			if cancel {
+				return nil, false
+			}
+			if back {
+				step = stepBaseURL
+				continue
+			}
+			if in != "" {
+				parsed, err := agent.ParseContextWindow(in)
+				if err != nil {
+					fmt.Println(errStyle.Render("  " + err.Error()))
+					continue
+				}
+				contextWindow = parsed
+			}
 			step = stepConfirm
 
 		case stepConfirm:
@@ -622,14 +657,19 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			fmt.Printf("  2  API Key  %s\n", maskKey(apiKey))
 			fmt.Printf("  3  模型      %s\n", model)
 			fmt.Printf("  4  地址      %s\n", orDefault(baseURL, "服务商默认"))
+			contextLabel := agent.FormatContextWindow(contextWindow)
+			if contextWindow <= 0 {
+				contextLabel = fmt.Sprintf("auto (%s)", agent.FormatContextWindow(agent.ModelContextWindow(model)))
+			}
+			fmt.Printf("  5  上下文    %s tokens\n", contextLabel)
 			fmt.Println(infoStyle.Render("     档案名    " + name))
 			fmt.Println()
-			in, back, cancel := s.askWithBack("  回车/Y 保存 · 1-4 修改对应项 · q 取消: ")
+			in, back, cancel := s.askWithBack("  回车/Y 保存 · 1-5 修改对应项 · q 取消: ")
 			if cancel {
 				return nil, false
 			}
 			if back {
-				step = stepBaseURL
+				step = stepContextWindow
 				continue
 			}
 			switch strings.ToLower(in) {
@@ -650,15 +690,19 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			case "4":
 				step = stepBaseURL
 				continue
+			case "5":
+				step = stepContextWindow
+				continue
 			case "", "y", "yes":
 				return &agent.Config{
-					Provider: provider,
-					APIKey:   apiKey,
-					Model:    model,
-					BaseURL:  baseURL,
+					Provider:      provider,
+					APIKey:        apiKey,
+					Model:         model,
+					BaseURL:       baseURL,
+					ContextWindow: contextWindow,
 				}, true
 			default:
-				fmt.Println(errStyle.Render("  请输入 Y、1-4 或 q"))
+				fmt.Println(errStyle.Render("  请输入 Y、1-5 或 q"))
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package shell
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -145,7 +146,9 @@ func (s *Session) launchAgent(workdir, intent string, task *model.Task) {
 			if answer != "" && strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
 				msg = answer
 			}
-			if err := gitx.CommitAll(workdir, msg); err != nil {
+			if err := gitx.CommitAll(workdir, msg); errors.Is(err, gitx.ErrInterrupted) {
+				fmt.Println(infoStyle.Render("  commit cancelled — changes remain uncommitted"))
+			} else if err != nil {
 				fmt.Println(errStyle.Render("  commit failed: " + err.Error()))
 			} else {
 				fmt.Println(okStyle.Render("  committed"))

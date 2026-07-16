@@ -17,30 +17,33 @@ const DefaultModel = "claude-sonnet-4-20250514"
 
 // Config holds the API configuration for the AI agent.
 type Config struct {
-	Provider string `json:"provider"` // "anthropic" or "openai"
-	APIKey   string `json:"api_key"`
-	Model    string `json:"model"`
-	BaseURL  string `json:"base_url,omitempty"`
+	Provider      string `json:"provider"` // "anthropic" or "openai"
+	APIKey        string `json:"api_key"`
+	Model         string `json:"model"`
+	BaseURL       string `json:"base_url,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
 }
 
 // Profile is one named, complete API configuration. Users can keep several
 // (e.g. "anthropic", "火山方舟", "local") and switch between them with
 // /profile <name>. The active profile is whatever Current points to.
 type Profile struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
-	APIKey   string `json:"api_key"`
-	Model    string `json:"model"`
-	BaseURL  string `json:"base_url,omitempty"`
+	Name          string `json:"name"`
+	Provider      string `json:"provider"`
+	APIKey        string `json:"api_key"`
+	Model         string `json:"model"`
+	BaseURL       string `json:"base_url,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
 }
 
 // ToConfig materializes a profile into the Config the agent runtime uses.
 func (p Profile) ToConfig() Config {
 	return Config{
-		Provider: p.Provider,
-		APIKey:   p.APIKey,
-		Model:    p.Model,
-		BaseURL:  p.BaseURL,
+		Provider:      p.Provider,
+		APIKey:        p.APIKey,
+		Model:         p.Model,
+		BaseURL:       p.BaseURL,
+		ContextWindow: p.ContextWindow,
 	}
 }
 

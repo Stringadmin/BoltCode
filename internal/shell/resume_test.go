@@ -16,7 +16,7 @@ func TestLoadAgentConfigForResumeMatchesSavedProvider(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".boltcode"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := command.SaveProfile("deep", &agent.Config{Provider: "deepseek", APIKey: "deep-key", Model: "deepseek-chat", BaseURL: "https://deep"}); err != nil {
+	if err := command.SaveProfile("deep", &agent.Config{Provider: "deepseek", APIKey: "deep-key", Model: "deepseek-chat", BaseURL: "https://deep", ContextWindow: 256_000}); err != nil {
 		t.Fatal(err)
 	}
 	if err := command.SaveProfile("claude", &agent.Config{Provider: "anthropic", APIKey: "claude-key", Model: "claude-sonnet"}); err != nil {
@@ -27,7 +27,7 @@ func TestLoadAgentConfigForResumeMatchesSavedProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "deepseek" || cfg.APIKey != "deep-key" {
+	if cfg.Provider != "deepseek" || cfg.APIKey != "deep-key" || cfg.ContextWindow != 256_000 {
 		t.Fatalf("matched config = %+v", cfg)
 	}
 }

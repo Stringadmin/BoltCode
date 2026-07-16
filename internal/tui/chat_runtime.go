@@ -89,7 +89,7 @@ func (m *ChatModel) statusTick() tea.Cmd {
 // through a private pipe for backwards-compatible terminal rendering, while
 // progress and tool lifecycle use structured events. Session-local flags and
 // cancellation prevent one chat from leaking state into another.
-func RunChat(a *agent.Agent) error {
+func RunChat(a *agent.Agent) (string, error) {
 	chatRuntimeMu.Lock()
 	defer chatRuntimeMu.Unlock()
 
@@ -140,7 +140,7 @@ func RunChat(a *agent.Agent) error {
 	realStdout := os.Stdout
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		return err
+		return "", err
 	}
 	os.Stdout = writer
 
@@ -173,7 +173,7 @@ func RunChat(a *agent.Agent) error {
 	_ = writer.Close()
 	os.Stdout = realStdout
 	_ = reader.Close()
-	return runErr
+	return model.switchSessionID, runErr
 }
 
 func forwardAgentOutput(reader *os.File, lines chan<- string) {

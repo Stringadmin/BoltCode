@@ -3,11 +3,13 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
@@ -134,6 +136,45 @@ func TestStructuredToolEventShowsExactProgress(t *testing.T) {
 	}
 }
 
+func TestPlanPanelVisualizesCompletedCurrentAndPendingTasks(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.setPlanItems([]agent.TodoItem{
+		{Content: "inspect architecture", Status: "completed"},
+		{Content: "implement visual plan", Status: "in_progress"},
+		{Content: "run regression tests", Status: "pending"},
+	})
+	panel := m.renderPlanPanel()
+	plain := ansi.Strip(panel)
+	for _, want := range []string{"task plan · 1/3", "✓ inspect architecture", "◆ implement visual plan", "○ run regression tests"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("plan panel missing %q:\n%s", want, plain)
+		}
+	}
+	if !planCompletedStyle.GetStrikethrough() {
+		t.Fatal("completed task style must enable strikethrough")
+	}
+}
+
+func TestTodoWriteEventReplacesAndClearsPlanPanel(t *testing.T) {
+	m := newChatTestModel()
+	m.recordToolEvent(agent.Event{
+		Kind:     agent.EventToolFinished,
+		ToolName: "todo_write",
+		PlanItems: []agent.TodoItem{
+			{Content: "first", Status: "completed"},
+			{Content: "second", Status: "in_progress"},
+		},
+	})
+	if m.planDone != 1 || m.planTotal != 2 || m.planCurrent != "second" || len(m.planItems) != 2 {
+		t.Fatalf("updated plan state: done=%d total=%d current=%q items=%d", m.planDone, m.planTotal, m.planCurrent, len(m.planItems))
+	}
+	m.recordToolEvent(agent.Event{Kind: agent.EventToolFinished, ToolName: "todo_write"})
+	if m.planTotal != 0 || len(m.planItems) != 0 || m.renderPlanPanel() != "" {
+		t.Fatalf("cleared plan remained visible: total=%d items=%d", m.planTotal, len(m.planItems))
+	}
+}
+
 func TestToolTimelineCollapsesAndExpandsDetails(t *testing.T) {
 	m := newChatTestModel()
 	m.width = 100
@@ -175,7 +216,7 @@ func TestRecoverableErrorOffersRetryWithoutEndingSession(t *testing.T) {
 	}
 }
 
-func TestStatusShowsContextCostAndPlan(t *testing.T) {
+func TestStatusShowsContextPlanAndShortcutsWithoutCost(t *testing.T) {
 	a := &agent.Agent{
 		Config: agent.Config{Model: "deepseek-chat"},
 		TodoList: []agent.TodoItem{
@@ -191,10 +232,13 @@ func TestStatusShowsContextCostAndPlan(t *testing.T) {
 	m.layout()
 	m.Update(statusTickMsg{})
 	status := ansi.Strip(m.renderStatusBar())
-	for _, want := range []string{"context 50%", "32k/1.0k in/out", "$", "plan 1/2", "implement"} {
+	for _, want := range []string{"context 50%", "32k/1.0k in/out", "tasks 1/2", "implement", "Ctrl+P sessions", "Ctrl+O expand tool results"} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("status missing %q:\n%s", want, status)
 		}
+	}
+	if strings.Contains(status, "$") {
+		t.Fatalf("status should not show estimated cost:\n%s", status)
 	}
 }
 
@@ -206,6 +250,174 @@ func TestModelPopupIncludesCurrentCustomModel(t *testing.T) {
 	}
 	if m.popup.items[0].id != "deepseek-v4-pro" || !strings.Contains(m.popup.items[0].desc, "current") {
 		t.Fatalf("custom current model missing from popup: %+v", m.popup.items)
+	}
+}
+
+func TestCtrlPSessionPopupFiltersWorkspaceAndPreservesDraft(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	workspace := filepath.Join(t.TempDir(), "project")
+	otherWorkspace := filepath.Join(t.TempDir(), "other")
+
+	current := &agent.Agent{
+		Config:   agent.Config{Model: "deepseek-chat"},
+		Workdir:  workspace,
+		Intent:   "fix the current project",
+		Messages: []agent.Message{{Role: "user", Content: "fix the current project"}, {Role: "assistant", Content: "working on it"}},
+	}
+	currentID, err := agent.SaveSession(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := &agent.Agent{
+		Config:   agent.Config{Model: "gpt-test"},
+		Workdir:  otherWorkspace,
+		Intent:   "unrelated conversation",
+		Messages: []agent.Message{{Role: "user", Content: "unrelated conversation"}, {Role: "assistant", Content: "other"}},
+	}
+	if _, err := agent.SaveSession(other); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewChat(&agent.Agent{Config: agent.Config{Model: "deepseek-chat"}, Workdir: workspace})
+	m.textarea.SetValue("unfinished draft")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if m.popup == nil || m.popup.kind != "sessions" {
+		t.Fatal("Ctrl+P did not open the session popup")
+	}
+	if len(m.popup.items) != 1 || m.popup.items[0].id != currentID {
+		t.Fatalf("workspace sessions = %+v, want only %s", m.popup.items, currentID)
+	}
+	m.handlePopupKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if got := m.textarea.Value(); got != "unfinished draft" {
+		t.Fatalf("closing session popup changed draft to %q", got)
+	}
+}
+
+func TestSessionPopupSelectionRequestsSafeSwitch(t *testing.T) {
+	m := NewChat(&agent.Agent{Config: agent.Config{Model: "test-model"}, Workdir: t.TempDir()})
+	model, cmd := m.applyPopupSelection("sessions", popupItem{id: "1234abcd"})
+	result := model.(*ChatModel)
+	if cmd == nil || !result.quitting || result.switchSessionID != "1234abcd" {
+		t.Fatalf("session switch state: cmd=%v quitting=%v id=%q", cmd != nil, result.quitting, result.switchSessionID)
+	}
+}
+
+func TestSessionPopupSearchesPreviewAndMetadata(t *testing.T) {
+	p := &popupState{
+		items: []popupItem{
+			{id: "1", label: "修复输入框", desc: "deepseek-chat"},
+			{id: "2", label: "Refactor storage", desc: "openai"},
+		},
+	}
+	p.applyFilter("deep")
+	if len(p.filtered) != 1 || p.items[p.filtered[0]].id != "1" {
+		t.Fatalf("metadata search result = %+v", p.filtered)
+	}
+	p.applyFilter("storage")
+	if len(p.filtered) != 1 || p.items[p.filtered[0]].id != "2" {
+		t.Fatalf("preview search result = %+v", p.filtered)
+	}
+}
+
+func TestSessionPopupChineseSelectionStaysOnOneRow(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 86
+	m.height = 24
+	m.layout()
+	m.popup = &popupState{
+		kind:     "sessions",
+		title:    "Sessions",
+		subtitle: `F:\BoltCode`,
+		items: []popupItem{{
+			id:    "fa49c41d",
+			label: "你好",
+			desc:  "07-16 14:31 · deepseek-v4-pro · 6 messages · fa49c41d",
+		}},
+	}
+	m.popup.applyFilter("")
+	panel := m.renderPopupPanel()
+	if got, want := lipgloss.Height(panel), 9; got != want {
+		t.Fatalf("session popup height = %d, want %d (selected row wrapped):\n%s", got, want, ansi.Strip(panel))
+	}
+}
+
+func TestPopupFloatsOverConversationBackground(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 26
+	m.layout()
+	m.popup = &popupState{
+		kind:  "sessions",
+		title: "Sessions",
+		items: []popupItem{{
+			id:    "1234abcd",
+			label: "Earlier conversation",
+			desc:  "07-16 12:00 · test-model · 4 messages · 1234abcd",
+		}},
+	}
+	m.popup.applyFilter("")
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "⚡ BoltCode") || !strings.Contains(view, "Sessions") {
+		t.Fatalf("floating popup did not preserve the chat behind it:\n%s", view)
+	}
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("overlay height = %d, want %d", len(lines), m.height)
+	}
+	for index, line := range lines {
+		if got := ansi.StringWidth(line); got != m.width {
+			t.Fatalf("overlay line %d width = %d, want %d", index, got, m.width)
+		}
+	}
+}
+
+func TestPopupTopAndBottomBordersHaveSameCellWidth(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 26
+	m.layout()
+	m.popup = &popupState{
+		kind:  "commands",
+		title: "Slash Commands",
+		items: []popupItem{{
+			id:    "/sessions",
+			label: "/sessions",
+			desc:  "browse conversations in this workspace · Ctrl+P",
+		}},
+	}
+	m.popup.applyFilter("")
+	lines := strings.Split(m.renderPopupPanel(), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("popup panel has %d lines", len(lines))
+	}
+	topWidth := ansi.StringWidth(lines[0])
+	bottomWidth := ansi.StringWidth(lines[len(lines)-1])
+	if topWidth != bottomWidth {
+		t.Fatalf("popup borders differ: top=%d bottom=%d\n%s", topWidth, bottomWidth, ansi.Strip(strings.Join(lines, "\n")))
+	}
+}
+
+func TestOverlayBorderDoesNotShiftAtWideBackgroundCharacter(t *testing.T) {
+	const width = 40
+	baseLines := make([]string, 7)
+	for index := range baseLines {
+		baseLines[index] = strings.Repeat(".", width)
+	}
+	// The popup starts at cell 10. Put a two-cell CJK rune across cells 9-10
+	// on the row where the bottom border will be composed.
+	baseLines[4] = strings.Repeat(".", 9) + "你" + strings.Repeat(".", 29)
+	popup := strings.Join([]string{
+		"╭" + strings.Repeat("─", 18) + "╮",
+		"│" + strings.Repeat(" ", 18) + "│",
+		"╰" + strings.Repeat("─", 18) + "╯",
+	}, "\n")
+	overlay := strings.Split(ansi.Strip(overlayCentered(strings.Join(baseLines, "\n"), popup, width, len(baseLines))), "\n")
+	topLeft := strings.Index(overlay[2], "╭")
+	bottomLeft := strings.Index(overlay[4], "╰")
+	if topLeft != 10 || bottomLeft != topLeft {
+		t.Fatalf("popup border shifted: top-left=%d bottom-left=%d\n%s", topLeft, bottomLeft, strings.Join(overlay, "\n"))
 	}
 }
 
@@ -303,9 +515,40 @@ func TestInputReservesSecondRowForWindowsIME(t *testing.T) {
 	if lines := strings.Count(m.textarea.View(), "\n") + 1; lines < chatInputRows {
 		t.Fatalf("textarea rows = %d, want at least %d", lines, chatInputRows)
 	}
-	wantViewportHeight := m.height - (chatInputRows + 2) - 2 - 1
+	wantViewportHeight := m.height - (chatInputRows + 2) - 2 - 1 - chatConversationGapRows
 	if m.viewport.Height != wantViewportHeight {
 		t.Fatalf("viewport height = %d, want %d", m.viewport.Height, wantViewportHeight)
+	}
+}
+
+func TestConversationKeepsGapAboveBottomChrome(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 80
+	m.height = 24
+	m.layout()
+	m.busy = false
+	view := strings.Split(ansi.Strip(m.View()), "\n")
+	if len(view) != m.height {
+		t.Fatalf("chat view height = %d, want %d", len(view), m.height)
+	}
+	gapRow := 1 + m.viewport.Height
+	if gapRow >= len(view) {
+		t.Fatalf("gap row %d outside view with %d lines", gapRow, len(view))
+	}
+	if strings.TrimSpace(view[gapRow]) != "" {
+		t.Fatalf("conversation gap row is not blank: %q", view[gapRow])
+	}
+	if gapRow+1 >= len(view) || !strings.Contains(view[gapRow+1], "ready") {
+		t.Fatalf("status bar does not follow conversation gap:\n%s", strings.Join(view, "\n"))
+	}
+}
+
+func TestModelSwitchNoticeStartsANewMessageBlock(t *testing.T) {
+	m := newChatTestModel()
+	m.lines = []string{"previous reply"}
+	m.applyPopupSelection("models", popupItem{id: "deepseek-v4-pro"})
+	if len(m.lines) != 3 || m.lines[1] != "" || !strings.Contains(ansi.Strip(m.lines[2]), "switched to") {
+		t.Fatalf("model switch block = %#v", m.lines)
 	}
 }
 

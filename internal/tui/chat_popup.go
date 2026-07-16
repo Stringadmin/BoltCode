@@ -1,23 +1,80 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
 )
 
 func (m *ChatModel) showCommandPopup() (tea.Model, tea.Cmd) {
-	items := make([]popupItem, 0, len(agent.SlashCommands))
+	items := make([]popupItem, 0, len(agent.SlashCommands)+1)
+	items = append(items, popupItem{id: "/sessions", label: "/sessions", desc: "browse conversations in this workspace · Ctrl+P"})
 	for _, command := range agent.SlashCommands {
 		items = append(items, popupItem{id: command.Name, label: command.Name, desc: command.Desc})
 	}
 	m.popup = &popupState{kind: "commands", items: items, title: "Slash Commands"}
 	m.popup.applyFilter("")
 	return m, nil
+}
+
+func (m *ChatModel) showSessionPopup() (tea.Model, tea.Cmd) {
+	sessions, err := agent.ListSessions()
+	if err != nil {
+		m.statusHint = "could not load saved sessions"
+		return m, nil
+	}
+
+	items := make([]popupItem, 0, len(sessions))
+	for _, session := range sessions {
+		if !sameWorkdir(session.Workdir, m.agent.Workdir) {
+			continue
+		}
+		preview := ansi.Truncate(sessionPreview(session), 52, "…")
+		model := session.Model
+		if model == "" {
+			model = "unknown model"
+		}
+		desc := fmt.Sprintf("%s · %s · %d messages · %s",
+			session.UpdatedAt.Format("01-02 15:04"), model, len(session.Messages), session.ID)
+		if session.ID == m.agent.SessionID {
+			desc += " · current"
+		}
+		items = append(items, popupItem{id: session.ID, label: preview, desc: desc})
+	}
+	if len(items) == 0 {
+		m.statusHint = "no saved sessions for this workspace"
+		return m, nil
+	}
+
+	m.popup = &popupState{
+		kind:          "sessions",
+		items:         items,
+		title:         "Sessions",
+		subtitle:      filepath.Clean(m.agent.Workdir),
+		preserveInput: true,
+	}
+	m.popup.applyFilter("")
+	return m, nil
+}
+
+func sameWorkdir(left, right string) bool {
+	leftPath, leftErr := filepath.Abs(filepath.Clean(left))
+	rightPath, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		leftPath = filepath.Clean(left)
+		rightPath = filepath.Clean(right)
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftPath, rightPath)
+	}
+	return leftPath == rightPath
 }
 
 func (m *ChatModel) showModelPopup() (tea.Model, tea.Cmd) {
@@ -136,7 +193,14 @@ func (m *ChatModel) handlePopupKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmCh <- false
 			return m, nil
 		}
-		m.textarea.Reset()
+		if !popup.preserveInput {
+			m.textarea.Reset()
+		}
+		return m, nil
+	case tea.KeyCtrlP:
+		if popup.kind == "sessions" {
+			m.popup = nil
+		}
 		return m, nil
 	case tea.KeyUp:
 		if popup.selected > 0 {
@@ -161,7 +225,9 @@ func (m *ChatModel) handlePopupKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		kind := popup.kind
 		m.popup = nil
-		m.textarea.Reset()
+		if !popup.preserveInput {
+			m.textarea.Reset()
+		}
 		return m.applyPopupSelection(kind, selection)
 	case tea.KeyRunes, tea.KeySpace:
 		if popup.kind != "confirm" {
@@ -177,6 +243,9 @@ func (m *ChatModel) applyPopupSelection(kind string, selection popupItem) (tea.M
 	case "models":
 		m.agent.Config.Model = selection.id
 		m.model = selection.id
+		if len(m.lines) > 0 && m.lines[len(m.lines)-1] != "" {
+			m.lines = append(m.lines, "")
+		}
 		m.lines = append(m.lines, chatGreenStyle.Render("  ✓ switched to: ")+selection.id)
 		m.logDirty = true
 		m.refreshViewport()
@@ -195,6 +264,15 @@ func (m *ChatModel) applyPopupSelection(kind string, selection popupItem) (tea.M
 		}
 		m.textarea.SetValue(current + "@" + selection.id + " ")
 		return m, nil
+	case "sessions":
+		if selection.id == m.agent.SessionID {
+			m.statusHint = "already viewing this session"
+			return m, nil
+		}
+		m.switchSessionID = selection.id
+		m.agent.Cancel()
+		m.quitting = true
+		return m, tea.Quit
 	case "confirm":
 		switch selection.id {
 		case "yes":

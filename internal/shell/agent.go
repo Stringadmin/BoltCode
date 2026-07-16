@@ -11,7 +11,6 @@ import (
 	"github.com/Stringadmin/BoltCode/internal/agent"
 	"github.com/Stringadmin/BoltCode/internal/gitx"
 	"github.com/Stringadmin/BoltCode/internal/model"
-	"github.com/Stringadmin/BoltCode/internal/tui"
 )
 
 // runAgent launches the built-in AI agent.
@@ -108,8 +107,14 @@ func (s *Session) launchAgent(workdir, intent string, task *model.Task) {
 	// its stdout is captured to a pipe and displayed in the TUI's message
 	// area. The input box accepts one message whenever the agent is ready and
 	// remains available as a draft editor while a response is in progress.
-	if err := tui.RunChat(a); err != nil {
-		fmt.Println(errStyle.Render("  tui error: " + err.Error()))
+	finalAgent, chatErr := runChatSessionChain(s.App, a)
+	if chatErr != nil {
+		fmt.Println(errStyle.Render("  tui error: " + chatErr.Error()))
+	}
+	if finalAgent != nil {
+		a = finalAgent
+		workdir = a.Workdir
+		intent = a.Intent
 	}
 
 	// After agent finishes: check for uncommitted changes and offer to commit.

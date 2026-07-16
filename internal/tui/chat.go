@@ -45,11 +45,12 @@ type confirmRequestMsg struct{ cmd string }
 type agentEventMsg struct{ event agent.Event }
 
 const (
-	chatInputRows        = 2 // second row keeps Windows IME pre-edit text inside the border
-	chatReadyPlaceholder = "Type a message, / for commands, or @ for files..."
-	chatBusyPlaceholder  = "Agent is working — draft here, send when ready..."
-	chatDonePlaceholder  = "Session ended — press Ctrl+C to return"
-	chatErrorPlaceholder = "Agent stopped with an error — press Ctrl+C to return"
+	chatInputRows           = 2 // second row keeps Windows IME pre-edit text inside the border
+	chatConversationGapRows = 1 // breathing room between message history and bottom chrome
+	chatReadyPlaceholder    = "Type a message, / for commands, or @ for files..."
+	chatBusyPlaceholder     = "Agent is working — draft here, send when ready..."
+	chatDonePlaceholder     = "Session ended — press Ctrl+C to return"
+	chatErrorPlaceholder    = "Agent stopped with an error — press Ctrl+C to return"
 )
 
 // ── ChatModel ───────────────────────────────────────────────────────────────
@@ -92,7 +93,6 @@ type ChatModel struct {
 	inputTokens   int
 	outputTokens  int
 	contextTokens int
-	cost          float64
 	tools         int
 	rounds        int
 	// busy is true while the agent is generating or running tools. finished
@@ -114,6 +114,7 @@ type ChatModel struct {
 
 	toolTimeline  []toolTimelineEntry
 	toolsExpanded bool
+	planItems     []agent.TodoItem
 	planDone      int
 	planTotal     int
 	planCurrent   string
@@ -121,17 +122,22 @@ type ChatModel struct {
 	// Popup
 	popup *popupState
 
-	quitting bool
+	switchSessionID string
+	quitting        bool
 }
 
 type popupState struct {
-	kind     string // "commands" | "models" | "files" | "confirm"
+	kind     string // "commands" | "models" | "files" | "sessions" | "confirm"
 	items    []popupItem
 	filtered []int // indices into items after filtering
 	selected int   // index into filtered
 	title    string
+	subtitle string
 	filter   string // fuzzy filter query
 	prompt   string // for confirm popup: the command being confirmed
+	// Session browsing is opened independently of the textarea. Closing it
+	// should restore a draft instead of clearing what the user was typing.
+	preserveInput bool
 }
 
 type popupItem struct {
@@ -172,7 +178,7 @@ func NewChat(a *agent.Agent) *ChatModel {
 		chatDimStyle.Render(fmt.Sprintf("  │  %s · %s", workspace, a.Config.Model)),
 		chatDimStyle.Render("  │"),
 		"  │  Describe what you want to build, fix, or understand.",
-		chatDimStyle.Render("  ╰─ / commands · @ files · PgUp/PgDn scroll · Ctrl+C interrupt · Ctrl+D exit"),
+		chatDimStyle.Render("  ╰─ / commands · @ files · Ctrl+P sessions · Ctrl+O tool results · Ctrl+D exit"),
 	}
 	if len(a.Messages) == 0 && strings.TrimSpace(a.Intent) != "" {
 		welcome = append(welcome, "", chatUserStyle.Render("  ◆ you"))
@@ -203,15 +209,7 @@ func NewChat(a *agent.Agent) *ChatModel {
 		activity:     "Preparing project context",
 		busySince:    time.Now(),
 	}
-	for _, item := range a.TodoList {
-		model.planTotal++
-		if item.Status == "completed" {
-			model.planDone++
-		}
-		if item.Status == "in_progress" && model.planCurrent == "" {
-			model.planCurrent = item.Content
-		}
-	}
+	model.setPlanItems(a.TodoList)
 	return model
 }
 
@@ -309,14 +307,12 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusTickMsg:
 		if m.agent.Stats != nil {
-			in, out, contextTokens, tools, rounds, cost := m.agent.Stats.Snapshot()
+			in, out, contextTokens, tools, rounds, _ := m.agent.Stats.Snapshot()
 			m.inputTokens = in
 			m.outputTokens = out
 			m.contextTokens = contextTokens
-			m.tokens = in + out
 			m.tools = tools
 			m.rounds = rounds
-			m.cost = cost
 		}
 		m.model = m.agent.Config.Model
 		cmds = append(cmds, m.statusTick())
@@ -411,7 +407,7 @@ func (m *ChatModel) layout() {
 	inputH := chatInputRows + 2 // textarea rows + top/bottom border
 	headerH := 1
 	statusH := 2 // primary status + session metrics
-	vpH := m.height - inputH - statusH - headerH
+	vpH := m.height - inputH - statusH - headerH - chatConversationGapRows
 	if vpH < 3 {
 		vpH = 3
 	}
@@ -446,6 +442,12 @@ func (m *ChatModel) refreshViewport() {
 			content += "\n\n"
 		}
 		content += timeline
+	}
+	if plan := m.renderPlanPanel(); plan != "" {
+		if content != "" {
+			content += "\n\n"
+		}
+		content += plan
 	}
 	if m.busy && !m.finished {
 		if content != "" {
@@ -562,6 +564,9 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 		return m, nil
 
+	case tea.KeyCtrlP:
+		return m.showSessionPopup()
+
 	case tea.KeyEnter:
 		text := strings.TrimSpace(m.textarea.Value())
 		if text == "" {
@@ -634,6 +639,8 @@ func (m *ChatModel) handleSlashCommand(text string) (tea.Model, tea.Cmd) {
 	case "/model":
 		m.textarea.Reset()
 		return m.showModelPopup()
+	case "/sessions":
+		return m.showSessionPopup()
 	case "/exit", "/quit", "/q":
 		m.quitting = true
 		return m, tea.Quit
@@ -722,16 +729,17 @@ func (m *ChatModel) View() string {
 		return "Starting BoltCode..."
 	}
 
-	if m.popup != nil {
-		return m.renderPopupOverlay()
-	}
-
-	return lipgloss.JoinVertical(lipgloss.Left,
+	base := lipgloss.JoinVertical(lipgloss.Left,
 		m.renderSessionHeader(),
 		m.viewport.View(),
+		strings.Repeat(" ", max(0, m.width)),
 		m.renderStatusBar(),
 		m.renderInputBox(),
 	)
+	if m.popup != nil {
+		return m.renderPopupOverlay(base)
+	}
+	return base
 }
 
 func (m *ChatModel) renderSessionHeader() string {
@@ -804,7 +812,7 @@ func (m *ChatModel) renderStatusBar() string {
 	if m.ready && !m.viewport.AtBottom() {
 		scroll = int(m.viewport.ScrollPercent() * 100)
 	}
-	right := chatDimStyle.Render(fmt.Sprintf("%s · %s · scroll %d%%", m.model, permission, scroll))
+	right := chatDimStyle.Render(fmt.Sprintf("%s · %s · ↕ %d%% · Ctrl+P sessions", m.model, permission, scroll))
 	primary := fitStatusLine(left+"  │  "+right, m.width)
 
 	window := m.agent.ContextWindow()
@@ -812,16 +820,23 @@ func (m *ChatModel) renderStatusBar() string {
 	if window > 0 {
 		contextPct = int(float64(m.contextTokens) / float64(window) * 100)
 	}
-	plan := "plan —"
+	statusParts := []string{fmt.Sprintf("context %d%% · %s/%s", contextPct, formatMetricTokens(m.contextTokens), formatMetricTokens(window))}
 	if m.planTotal > 0 {
-		plan = fmt.Sprintf("plan %d/%d", m.planDone, m.planTotal)
+		plan := fmt.Sprintf("tasks %d/%d", m.planDone, m.planTotal)
 		if m.planCurrent != "" {
 			plan += " · " + m.planCurrent
 		}
+		statusParts = append(statusParts, plan)
 	}
-	secondary := fmt.Sprintf("context %d%% · %s/%s  │  %s  │  $%.4f  │  %d tools · %d rounds  │  %s/%s in/out  │  wheel/PgUp scroll · Ctrl+O details",
-		contextPct, formatMetricTokens(m.contextTokens), formatMetricTokens(window), plan, m.cost, m.tools, m.rounds,
-		formatMetricTokens(m.inputTokens), formatMetricTokens(m.outputTokens))
+	statusParts = append(statusParts,
+		fmt.Sprintf("%d tools · %d rounds", m.tools, m.rounds),
+		fmt.Sprintf("%s/%s in/out", formatMetricTokens(m.inputTokens), formatMetricTokens(m.outputTokens)),
+	)
+	toolAction := "expand"
+	if m.toolsExpanded {
+		toolAction = "collapse"
+	}
+	secondary := strings.Join(statusParts, "  │  ") + fmt.Sprintf("  │  Ctrl+O %s tool results · wheel/PgUp scroll", toolAction)
 	secondary = fitStatusLine(chatDimStyle.Render(secondary), m.width)
 	return lipgloss.JoinVertical(lipgloss.Left,
 		statusBarStyle.Width(m.width).Render(primary),
@@ -858,10 +873,29 @@ func normalizeAgentLine(line string) (clean string, drop bool) {
 	return clean, drop
 }
 
-func (m *ChatModel) renderPopupOverlay() string {
+func (m *ChatModel) renderPopupOverlay(base string) string {
+	popup := m.renderPopupPanel()
+	return overlayCentered(base, popup, m.width, m.height)
+}
+
+func (m *ChatModel) renderPopupPanel() string {
 	p := m.popup
+	popupWidth := m.width - 12
+	if popupWidth > 100 {
+		popupWidth = 100
+	}
+	if popupWidth < 32 {
+		popupWidth = max(20, m.width-4)
+	}
+	// Style.Width includes horizontal padding in its wrapping calculation.
+	// Rows must use the actual inner width or a full selected row wraps by the
+	// four padding cells, which was especially visible with CJK session titles.
+	itemWidth := max(12, popupWidth-popupStyle.GetHorizontalPadding())
 	var items []string
-	items = append(items, chatTitleStyle.Render(p.title))
+	items = append(items, chatTitleStyle.Render(p.title)+chatDimStyle.Render("  esc"))
+	if p.subtitle != "" {
+		items = append(items, chatDimStyle.Render(p.subtitle))
+	}
 
 	// Confirm popup: show the command being confirmed.
 	if p.kind == "confirm" {
@@ -869,29 +903,27 @@ func (m *ChatModel) renderPopupOverlay() string {
 		items = append(items, chatPromptStyle.Render("  "+p.prompt))
 		items = append(items, "")
 		for i, it := range p.items {
-			if i == p.selected {
-				items = append(items, popupSelStyle.Render("▶ "+it.label+"  "+it.desc))
-			} else {
-				items = append(items, popupNormalStyle.Render("  "+it.label)+chatDimStyle.Render("  "+it.desc))
-			}
+			items = append(items, renderPopupItem(it, i == p.selected, itemWidth))
 		}
 		items = append(items, "")
 		items = append(items, chatDimStyle.Render("↑↓ navigate · Enter select"))
-		popup := popupStyle.Render(strings.Join(items, "\n"))
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, popup)
+		return popupStyle.Width(popupWidth).Render(strings.Join(items, "\n"))
 	}
 
-	// Filterable popup: show the live filter query.
+	// Filterable popup: keep the search affordance visible even before the
+	// user types, matching command-palette and session-switcher conventions.
+	search := chatDimStyle.Render("Search")
 	if p.filter != "" {
-		items = append(items, chatDimStyle.Render("  filter: ")+p.filter)
+		search = popupNormalStyle.Render(p.filter)
 	}
+	items = append(items, chatPromptStyle.Render("› ")+search)
 	items = append(items, "")
 
 	if len(p.filtered) == 0 {
 		items = append(items, chatDimStyle.Render("  (no matches)"))
 	}
 	// Cap visible rows so long lists don't overflow the screen.
-	const maxRows = 12
+	maxRows := min(12, max(3, m.height-10))
 	start := 0
 	if p.selected >= maxRows {
 		start = p.selected - maxRows + 1
@@ -902,19 +934,95 @@ func (m *ChatModel) renderPopupOverlay() string {
 	}
 	for vi := start; vi < end; vi++ {
 		it := p.items[p.filtered[vi]]
-		if vi == p.selected {
-			items = append(items, popupSelStyle.Render("▶ "+it.label+"  "+it.desc))
-		} else {
-			items = append(items, popupNormalStyle.Render("  "+it.label)+chatDimStyle.Render("  "+it.desc))
-		}
+		items = append(items, renderPopupItem(it, vi == p.selected, itemWidth))
 	}
 	if len(p.filtered) > maxRows {
 		items = append(items, chatDimStyle.Render(fmt.Sprintf("  … %d/%d", p.selected+1, len(p.filtered))))
 	}
 	items = append(items, "")
-	items = append(items, chatDimStyle.Render("type to filter · ↑↓ navigate · Enter select · Esc cancel"))
-	popup := popupStyle.Render(strings.Join(items, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, popup)
+	footer := "type to search · ↑↓ navigate · Enter select · Esc cancel"
+	if p.kind == "sessions" {
+		footer = "type to search · ↑↓ navigate · Enter switch · Esc cancel"
+	}
+	items = append(items, chatDimStyle.Render(footer))
+	return popupStyle.Width(popupWidth).Render(strings.Join(items, "\n"))
+}
+
+func renderPopupItem(item popupItem, selected bool, width int) string {
+	marker := "  "
+	if selected {
+		marker = "▶ "
+	}
+	labelWidth := max(8, width/2)
+	label := ansi.Truncate(item.label, labelWidth, "…")
+	line := marker + label
+	if item.desc != "" {
+		remaining := width - ansi.StringWidth(line) - 2
+		if remaining > 4 {
+			line += "  " + ansi.Truncate(item.desc, remaining, "…")
+		}
+	}
+	line = ansi.Truncate(line, width, "…")
+	if selected {
+		return popupSelStyle.Width(width).Render(line)
+	}
+	return popupNormalStyle.Render(line)
+}
+
+// overlayCentered composites a modal over the existing chat instead of using
+// lipgloss.Place, whose blank padding replaces the entire alternate screen.
+// ANSI-aware cuts preserve colors and wide CJK characters on both sides of
+// the popup, giving the terminal equivalent of a floating window.
+func overlayCentered(base, popup string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return popup
+	}
+	popupLines := strings.Split(popup, "\n")
+	popupWidth := min(width, ansiBlockWidth(popupLines))
+	popupHeight := min(height, len(popupLines))
+	startX := max(0, (width-popupWidth)/2)
+	startY := max(0, (height-popupHeight)/2)
+
+	baseLines := strings.Split(base, "\n")
+	output := make([]string, height)
+	for row := 0; row < height; row++ {
+		baseLine := ""
+		if row < len(baseLines) {
+			baseLine = baseLines[row]
+		}
+		baseLine = fitOverlayLine(baseLine, width)
+		popupRow := row - startY
+		if popupRow < 0 || popupRow >= popupHeight || popupRow >= len(popupLines) {
+			output[row] = baseLine
+			continue
+		}
+
+		overlayLine := fitOverlayLine(popupLines[popupRow], popupWidth)
+		// ANSI cuts cannot return half of a double-width rune. If the boundary
+		// lands inside CJK text or an emoji, pad the segment back to its exact
+		// target width so this popup row cannot shift left or right.
+		left := fitOverlayLine(ansi.Cut(baseLine, 0, startX), startX)
+		rightWidth := max(0, width-startX-popupWidth)
+		right := fitOverlayLine(ansi.Cut(baseLine, startX+popupWidth, width), rightWidth)
+		output[row] = fitOverlayLine(left+overlayLine+right, width)
+	}
+	return strings.Join(output, "\n")
+}
+
+func ansiBlockWidth(lines []string) int {
+	width := 0
+	for _, line := range lines {
+		width = max(width, ansi.StringWidth(line))
+	}
+	return width
+}
+
+func fitOverlayLine(line string, width int) string {
+	line = ansi.Truncate(line, width, "")
+	if padding := width - ansi.StringWidth(line); padding > 0 {
+		line += strings.Repeat(" ", padding)
+	}
+	return line
 }
 
 // stripCR removes carriage returns and the ANSI clear-line sequence so spinner

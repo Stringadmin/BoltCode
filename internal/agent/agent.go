@@ -73,7 +73,8 @@ type Agent struct {
 	SessionCreatedAt *time.Time
 
 	// TodoList is the agent's task plan for the current session, managed via
-	// the todo_write tool. Rendered in the footer so progress stays visible.
+	// the todo_write tool. Structured frontends render snapshots as a checklist
+	// while terminal mode keeps the compact footer summary.
 	TodoList []TodoItem
 	// ToolErrorCount tracks consecutive tool-failure rounds for self-repair. The
 	// system prompt advertises "max 3 retries"; after reaching this limit, the

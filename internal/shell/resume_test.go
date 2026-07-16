@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
 	"github.com/Stringadmin/BoltCode/internal/command"
@@ -48,5 +49,31 @@ func TestLoadAgentConfigForLegacyResumeUsesActiveProfile(t *testing.T) {
 	}
 	if cfg.Provider != "openai" || cfg.APIKey != "key" {
 		t.Fatalf("legacy resume config = %+v", cfg)
+	}
+}
+
+func TestNewAgentFromSessionRestoresConversationMetadata(t *testing.T) {
+	created := time.Now().Add(-time.Hour)
+	session := &agent.Session{
+		ID:            "1234abcd",
+		Workdir:       `F:\project`,
+		RepoRoot:      `F:\project`,
+		Intent:        "continue work",
+		Provider:      "deepseek",
+		BaseURL:       "https://example.test/v1",
+		Model:         "deepseek-v4-pro",
+		ContextWindow: 512_000,
+		Messages:      []agent.Message{{Role: "user", Content: "hello"}},
+		CreatedAt:     created,
+	}
+	a := newAgentFromSession(&agent.Config{Provider: "openai", APIKey: "local-key", Model: "fallback"}, session)
+	if a.SessionID != session.ID || a.Workdir != session.Workdir || a.Intent != session.Intent {
+		t.Fatalf("restored agent metadata = %+v", a)
+	}
+	if a.Config.Provider != session.Provider || a.Config.Model != session.Model || a.Config.ContextWindow != session.ContextWindow {
+		t.Fatalf("restored session config = %+v", a.Config)
+	}
+	if a.Config.APIKey != "local-key" {
+		t.Fatal("local credential should be retained when restoring session metadata")
 	}
 }

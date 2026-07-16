@@ -52,6 +52,12 @@ func startResumedAgent(version string, s *agent.Session) error {
 		return err
 	}
 
+	a := newAgentFromSession(cfg, s)
+	_, err = runChatSessionChain(app, a)
+	return err
+}
+
+func newAgentFromSession(cfg *agent.Config, s *agent.Session) *agent.Agent {
 	a := &agent.Agent{
 		Config:           *cfg,
 		Workdir:          s.Workdir,
@@ -74,8 +80,32 @@ func startResumedAgent(version string, s *agent.Session) error {
 	if s.ContextWindow > 0 {
 		a.Config.ContextWindow = s.ContextWindow
 	}
+	return a
+}
 
-	return tui.RunChat(a)
+// runChatSessionChain handles Ctrl+P switches without returning to the shell's
+// commit prompt between conversations. The TUI only returns a selected id;
+// credential/profile resolution remains in the shell layer alongside normal
+// --resume handling.
+func runChatSessionChain(app *command.App, current *agent.Agent) (*agent.Agent, error) {
+	for {
+		nextID, err := tui.RunChat(current)
+		if err != nil {
+			return current, err
+		}
+		if nextID == "" {
+			return current, nil
+		}
+		session, err := agent.LoadSession(nextID)
+		if err != nil {
+			return current, err
+		}
+		cfg, err := loadAgentConfigForResume(app, session)
+		if err != nil {
+			return current, err
+		}
+		current = newAgentFromSession(cfg, session)
+	}
 }
 
 // loadAgentConfigForResume gets an agent config; if not in a boltcode project

@@ -52,7 +52,11 @@ func (m *ChatModel) recordToolEvent(event agent.Event) {
 			entry.activity = event.Activity
 		}
 	}
-	if event.PlanTotal > 0 {
+	if event.PlanItems != nil || event.ToolName == "todo_write" {
+		m.setPlanItems(event.PlanItems)
+	} else if event.PlanTotal > 0 {
+		// Compatibility with callers/tests that only populate the compact plan
+		// counters rather than the structured snapshot.
 		m.planDone = event.PlanDone
 		m.planTotal = event.PlanTotal
 		m.planCurrent = event.PlanCurrent
@@ -72,9 +76,9 @@ func (m *ChatModel) renderToolTimeline() string {
 	if len(m.toolTimeline) == 0 {
 		return ""
 	}
-	mode := "Ctrl+O expand"
+	mode := "Ctrl+O expand results"
 	if m.toolsExpanded {
-		mode = "Ctrl+O collapse"
+		mode = "Ctrl+O collapse results"
 	}
 	lines := []string{chatDimStyle.Render(fmt.Sprintf("  ╭─ tools · %d · %s", len(m.toolTimeline), mode))}
 	start := 0

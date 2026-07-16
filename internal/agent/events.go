@@ -30,12 +30,14 @@ type Event struct {
 	PlanDone    int
 	PlanTotal   int
 	PlanCurrent string
+	PlanItems   []TodoItem
 }
 
 func (a *Agent) addPlanState(event *Event) {
 	if event == nil {
 		return
 	}
+	event.PlanItems = append([]TodoItem(nil), a.TodoList...)
 	for _, item := range a.TodoList {
 		event.PlanTotal++
 		if item.Status == "completed" {

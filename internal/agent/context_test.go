@@ -142,6 +142,16 @@ func TestTodoWriteBadStatusDefaults(t *testing.T) {
 	}
 }
 
+func TestPlanEventCarriesIndependentTodoSnapshot(t *testing.T) {
+	a := &Agent{TodoList: []TodoItem{{Content: "inspect", Status: "in_progress"}}}
+	event := Event{}
+	a.addPlanState(&event)
+	a.TodoList[0].Content = "mutated later"
+	if len(event.PlanItems) != 1 || event.PlanItems[0].Content != "inspect" {
+		t.Fatalf("plan event snapshot changed with agent state: %+v", event.PlanItems)
+	}
+}
+
 func TestMultiEditAppliesAll(t *testing.T) {
 	dir := t.TempDir()
 	a := &Agent{Workdir: dir}

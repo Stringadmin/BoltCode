@@ -94,9 +94,6 @@ func (s *Session) launchAgent(workdir, intent string, task *model.Task) {
 		return
 	}
 
-	fmt.Println()
-	agent.AnimateSessionStart(intent, cfg.Model, workdir)
-
 	a := &agent.Agent{
 		Config:   *cfg,
 		Workdir:  workdir,

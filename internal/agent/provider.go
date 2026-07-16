@@ -70,9 +70,20 @@ func buildAnthropicPayload(cfg Config, system string, messages []Message) []byte
 	body["system"] = []map[string]interface{}{
 		{"type": "text", "text": system, "cache_control": map[string]string{"type": "ephemeral"}},
 	}
-	body["tools"] = append(Tools, map[string]interface{}{
-		"cache_control": map[string]string{"type": "ephemeral"},
-	})
+	// Prompt caching belongs on the final real tool definition. Appending a
+	// standalone {cache_control: ...} object creates an invalid nameless tool.
+	tools := make([]map[string]interface{}, len(Tools))
+	for i, tool := range Tools {
+		clone := make(map[string]interface{}, len(tool)+1)
+		for key, value := range tool {
+			clone[key] = value
+		}
+		tools[i] = clone
+	}
+	if len(tools) > 0 {
+		tools[len(tools)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
+	}
+	body["tools"] = tools
 	if supportsThinking(model) {
 		budgetTokens := 16000
 		body["thinking"] = map[string]interface{}{
@@ -139,6 +150,9 @@ func convertMessagesToOpenAI(system string, messages []Message) []map[string]int
 							toolUseID = pendingToolIDs[resultIndex]
 						}
 						contentStr, _ := block["content"].(string)
+						if isError, _ := block["is_error"].(bool); isError {
+							contentStr = "Tool error: " + contentStr
+						}
 						out = append(out, map[string]interface{}{
 							"role":         "tool",
 							"tool_call_id": toolUseID,
@@ -281,15 +295,19 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		data, ok := parseSSEDataLine(line)
+		if !ok {
 			continue
 		}
-		data := line[6:]
 		if data == "[DONE]" {
 			break
 		}
 
 		var event struct {
+			Error *struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+			} `json:"error"`
 			Choices []struct {
 				Delta struct {
 					Content   string `json:"content"`
@@ -312,7 +330,10 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 		}
 
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
+			return nil, usage, fmt.Errorf("invalid OpenAI-compatible stream event: %w", err)
+		}
+		if event.Error != nil {
+			return nil, usage, fmt.Errorf("OpenAI-compatible stream error: %s", event.Error.Message)
 		}
 
 		for _, choice := range event.Choices {
@@ -320,13 +341,22 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 				textBuilder.WriteString(choice.Delta.Content)
 			}
 			for _, tc := range choice.Delta.ToolCalls {
+				if tc.Index < 0 {
+					return nil, usage, fmt.Errorf("OpenAI-compatible stream used negative tool index %d", tc.Index)
+				}
 				if toolCalls[tc.Index] == nil {
 					toolCalls[tc.Index] = &toolCallAccum{}
 				}
 				if tc.ID != "" {
+					if toolCalls[tc.Index].ID != "" && toolCalls[tc.Index].ID != tc.ID {
+						return nil, usage, fmt.Errorf("OpenAI-compatible stream changed tool id at index %d", tc.Index)
+					}
 					toolCalls[tc.Index].ID = tc.ID
 				}
 				if tc.Function.Name != "" {
+					if toolCalls[tc.Index].Name != "" && toolCalls[tc.Index].Name != tc.Function.Name {
+						return nil, usage, fmt.Errorf("OpenAI-compatible stream changed tool name at index %d", tc.Index)
+					}
 					toolCalls[tc.Index].Name = tc.Function.Name
 				}
 				toolCalls[tc.Index].Args += tc.Function.Arguments
@@ -379,6 +409,9 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 			"name":  tc.Name,
 			"input": input,
 		})
+	}
+	if len(content) == 0 {
+		return nil, usage, fmt.Errorf("OpenAI-compatible stream ended without text or tool calls")
 	}
 
 	result, _ := json.Marshal(content)

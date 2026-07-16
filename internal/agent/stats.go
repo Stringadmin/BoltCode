@@ -106,13 +106,12 @@ func (s *Stats) Elapsed() time.Duration {
 	return time.Since(s.StartTime)
 }
 
-// Snapshot returns a consistent copy of the key counters for the TUI status
-// bar. Reading them individually would race with the API goroutine; this takes
-// the lock once and returns all four together.
-func (s *Stats) Snapshot() (inTok, outTok, tools, rounds int) {
+// Snapshot returns a consistent copy of the counters used by interactive
+// frontends. Reading fields individually would race with the API goroutine.
+func (s *Stats) Snapshot() (inTok, outTok, lastInput, tools, rounds int, cost float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.InputTokens, s.OutputTokens, s.ToolCalls, s.Rounds
+	return s.InputTokens, s.OutputTokens, s.LastInput, s.ToolCalls, s.Rounds, s.TotalCost
 }
 
 // Display renders a compact session summary panel.

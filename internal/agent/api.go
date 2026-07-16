@@ -27,15 +27,21 @@ var sleepFn = time.Sleep
 // limit doesn't kill the whole session. Non-retryable failures (4xx auth /
 // request errors) surface immediately.
 func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
+	if err := validateToolMessageSequence(a.Messages, isAnthropicProvider(a.Config)); err != nil {
+		return nil, Usage{}, fmt.Errorf("invalid tool message sequence: %w", err)
+	}
 	url := providerURL(a.Config)
 	payload := buildPayload(a.Config, system, a.Messages)
 
 	// Cancelable context so Ctrl+C can interrupt a long API call without
 	// killing the process. The cancel func is stored on the Agent so the
 	// signal handler in launchAgent can call it.
-	ctx, cancel := context.WithCancel(context.Background())
-	a.cancelFn = cancel
-	defer cancel()
+	ctx, cancel := context.WithCancel(a.context())
+	a.setCurrentCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearCurrentCancel()
+	}()
 
 	const maxAttempts = 4
 	var backoff time.Duration = 1 * time.Second
@@ -174,11 +180,15 @@ func stderr() io.Writer {
 
 // streamBlock tracks a content block being assembled from SSE deltas.
 type streamBlock struct {
-	Type  string // "text", "tool_use", or "thinking"
+	Type  string // "text", "tool_use", "thinking", or "redacted_thinking"
 	ID    string // tool_use id
 	Name  string // tool_use name
 	Text  string // accumulated text
 	Input string // accumulated JSON input for tool_use
+	// Signature is required when replaying Anthropic extended-thinking blocks
+	// after a tool call. Data carries encrypted redacted_thinking content.
+	Signature string
+	Data      string
 }
 
 // parseStream reads SSE events from the Anthropic streaming API, prints text
@@ -191,16 +201,15 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 	// the response. Raise it to 4MB.
 	scanner.Buffer(make([]byte, 0, 1<<20), 4<<20)
 	var blocks []streamBlock
-	var currentIdx int
 	var usage Usage
 
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		if !strings.HasPrefix(line, "data: ") {
+		data, ok := parseSSEDataLine(line)
+		if !ok {
 			continue
 		}
-		data := line[6:]
 		if data == "[DONE]" {
 			break
 		}
@@ -216,54 +225,73 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 				JSON      string `json:"partial_json"`
 			} `json:"delta"`
 			ContentBlock struct {
-				Type string `json:"type"`
-				ID   string `json:"id"`
-				Name string `json:"name"`
+				Type      string `json:"type"`
+				ID        string `json:"id"`
+				Name      string `json:"name"`
+				Thinking  string `json:"thinking"`
+				Signature string `json:"signature"`
+				Data      string `json:"data"`
 			} `json:"content_block"`
 			Usage *Usage `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
+			return nil, usage, fmt.Errorf("invalid Anthropic stream event: %w", err)
 		}
 
 		switch event.Type {
 		case "content_block_start":
-			block := streamBlock{Type: event.ContentBlock.Type}
+			if event.Index < 0 {
+				return nil, usage, fmt.Errorf("Anthropic stream used negative content block index %d", event.Index)
+			}
+			block := streamBlock{
+				Type:      event.ContentBlock.Type,
+				Text:      event.ContentBlock.Thinking,
+				Signature: event.ContentBlock.Signature,
+				Data:      event.ContentBlock.Data,
+			}
 			if event.ContentBlock.Type == "tool_use" {
 				block.ID = event.ContentBlock.ID
 				block.Name = event.ContentBlock.Name
 			}
-			blocks = append(blocks, block)
-			currentIdx = event.Index
+			for len(blocks) <= event.Index {
+				blocks = append(blocks, streamBlock{})
+			}
+			if blocks[event.Index].Type != "" {
+				return nil, usage, fmt.Errorf("Anthropic stream repeated content block index %d", event.Index)
+			}
+			blocks[event.Index] = block
 
 		case "content_block_delta":
-			if event.Index >= len(blocks) {
-				continue
+			if event.Index < 0 || event.Index >= len(blocks) || blocks[event.Index].Type == "" {
+				return nil, usage, fmt.Errorf("Anthropic stream delta referenced unknown content block %d", event.Index)
 			}
-			currentIdx = event.Index
 			switch event.Delta.Type {
 			case "text_delta":
-				blocks[currentIdx].Text += event.Delta.Text
+				blocks[event.Index].Text += event.Delta.Text
 				// Stream text immediately for real-time feedback (typewriter effect).
 				fmt.Print(event.Delta.Text)
 			case "thinking_delta":
-				blocks[currentIdx].Text += event.Delta.Thinking
+				blocks[event.Index].Text += event.Delta.Thinking
+			case "signature_delta":
+				blocks[event.Index].Signature += event.Delta.Signature
 			case "input_json_delta":
-				blocks[currentIdx].Input += event.Delta.JSON
+				blocks[event.Index].Input += event.Delta.JSON
 			}
 
 		case "content_block_stop":
-			if currentIdx < len(blocks) && blocks[currentIdx].Type == "text" && strings.TrimSpace(blocks[currentIdx].Text) != "" {
+			if event.Index < len(blocks) && blocks[event.Index].Type == "text" && strings.TrimSpace(blocks[event.Index].Text) != "" {
 				// Text was already streamed token-by-token above; just end the paragraph.
 				fmt.Println()
 			}
 
-		case "signature_delta":
-			// Extended thinking signature — not user-visible, just consumed.
-
 		case "message_delta":
 			if event.Usage != nil {
-				usage = *event.Usage
+				if event.Usage.InputTokens > 0 {
+					usage.InputTokens = event.Usage.InputTokens
+				}
+				if event.Usage.OutputTokens > 0 {
+					usage.OutputTokens = event.Usage.OutputTokens
+				}
 			}
 			// Also check for usage in delta
 			var deltaMsg struct {
@@ -303,32 +331,79 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 		return nil, usage, fmt.Errorf("stream read error: %w", err)
 	}
 
-	// Assemble content blocks in the same format as non-streaming response.
-	// Thinking blocks are the model's internal reasoning — they are NOT included
-	// in the conversation history (that would waste context on invisible text).
+	// Assemble content blocks in the same format as the Messages API. Anthropic
+	// requires thinking/signature blocks to be replayed unchanged when the
+	// assistant also used tools; dropping them causes the next tool round to be
+	// rejected even though thinking text is not rendered to the user.
 	var content []map[string]interface{}
+	hasActionableContent := false
+	hasToolUse := false
+	for _, b := range blocks {
+		if b.Type == "tool_use" {
+			hasToolUse = true
+			break
+		}
+	}
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
+			if strings.TrimSpace(b.Text) == "" {
+				continue
+			}
 			content = append(content, map[string]interface{}{
 				"type": "text",
 				"text": b.Text,
 			})
+			hasActionableContent = true
+		case "thinking":
+			if hasToolUse && b.Signature == "" {
+				return nil, usage, fmt.Errorf("Anthropic thinking block is missing the signature required for tool continuation")
+			}
+			content = append(content, map[string]interface{}{
+				"type":      "thinking",
+				"thinking":  b.Text,
+				"signature": b.Signature,
+			})
+		case "redacted_thinking":
+			if b.Data == "" {
+				return nil, usage, fmt.Errorf("Anthropic redacted_thinking block is missing encrypted data")
+			}
+			content = append(content, map[string]interface{}{
+				"type": "redacted_thinking",
+				"data": b.Data,
+			})
 		case "tool_use":
-			var input interface{}
-			json.Unmarshal([]byte(b.Input), &input)
+			if b.ID == "" || b.Name == "" {
+				return nil, usage, fmt.Errorf("Anthropic tool call is missing id or name")
+			}
+			var input interface{} = map[string]interface{}{}
+			if b.Input != "" {
+				if err := json.Unmarshal([]byte(b.Input), &input); err != nil {
+					return nil, usage, fmt.Errorf("Anthropic tool call %s has invalid input: %w", b.Name, err)
+				}
+			}
 			content = append(content, map[string]interface{}{
 				"type":  "tool_use",
 				"id":    b.ID,
 				"name":  b.Name,
 				"input": input,
 			})
-			// "thinking" blocks are skipped intentionally.
+			hasActionableContent = true
 		}
+	}
+	if !hasActionableContent {
+		return nil, usage, fmt.Errorf("Anthropic stream ended without text or tool calls")
 	}
 
 	result, _ := json.Marshal(content)
 	return result, usage, nil
+}
+
+func parseSSEDataLine(line string) (string, bool) {
+	if !strings.HasPrefix(line, "data:") {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(line, "data:")), true
 }
 
 // buildURL constructs the full API endpoint from a base URL.
@@ -367,7 +442,13 @@ func (a *Agent) callAPINonStreaming() ([]byte, error) {
 	}
 	payload, _ := json.Marshal(body)
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	ctx, cancel := context.WithTimeout(a.context(), 60*time.Second)
+	a.setCurrentCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearCurrentCancel()
+	}()
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +495,13 @@ func (a *Agent) callOpenAINonStreaming() ([]byte, error) {
 	}
 	payload, _ := json.Marshal(body)
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	ctx, cancel := context.WithTimeout(a.context(), 60*time.Second)
+	a.setCurrentCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearCurrentCancel()
+	}()
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}

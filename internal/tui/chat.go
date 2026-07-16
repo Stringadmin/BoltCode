@@ -1,9 +1,7 @@
 package tui
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,7 +12,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/charmbracelet/x/term"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
 )
@@ -22,17 +19,18 @@ import (
 // ── Styles ──────────────────────────────────────────────────────────────────
 
 var (
-	chatUserStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	chatDimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	chatGreenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))
-	chatErrorStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
-	chatPromptStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
-	chatTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
-	statusBarStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(lipgloss.Color("236"))
-	inputBoxStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
-	popupStyle       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(0, 2)
-	popupSelStyle    = lipgloss.NewStyle().Background(lipgloss.Color("63")).Foreground(lipgloss.Color("255")).Bold(true)
-	popupNormalStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
+	chatUserStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	chatAssistantStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(lipgloss.Color("24"))
+	chatDimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	chatGreenStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))
+	chatErrorStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+	chatPromptStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
+	chatTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
+	statusBarStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(lipgloss.Color("236"))
+	inputBoxStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
+	popupStyle         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(0, 2)
+	popupSelStyle      = lipgloss.NewStyle().Background(lipgloss.Color("63")).Foreground(lipgloss.Color("255")).Bold(true)
+	popupNormalStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
 )
 
 // ── Message types (tea.Msg) ─────────────────────────────────────────────────
@@ -43,8 +41,10 @@ type agentReadyMsg struct{}
 type agentResultMsg struct{ err error }
 type statusTickMsg struct{}
 type confirmRequestMsg struct{ cmd string }
+type agentEventMsg struct{ event agent.Event }
 
 const (
+	chatInputRows        = 2 // second row keeps Windows IME pre-edit text inside the border
 	chatReadyPlaceholder = "Type a message, / for commands, or @ for files..."
 	chatBusyPlaceholder  = "Agent is working — draft here, send when ready..."
 	chatDonePlaceholder  = "Session ended — press Ctrl+C to return"
@@ -60,13 +60,15 @@ const (
 // blocked waiting for input. This keeps rendered messages and model turns in
 // sync instead of silently queueing multiple prompts.
 type ChatModel struct {
-	agent     *agent.Agent
-	agentIn   chan string
-	readyCh   chan struct{}
-	agentDone chan struct{}
-	resultCh  chan error
-	lineCh    chan string
-	confirmCh chan bool // TUI → agent: command confirmation answer
+	agent        *agent.Agent
+	agentIn      chan string
+	readyCh      chan struct{}
+	agentDone    chan struct{}
+	resultCh     chan error
+	lineCh       chan string
+	confirmCh    chan bool // TUI → agent: command confirmation answer
+	confirmReqCh chan string
+	eventCh      chan agent.Event
 
 	width  int
 	height int
@@ -83,22 +85,37 @@ type ChatModel struct {
 	logDirty    bool
 
 	// Status (read from agent.Stats)
-	busy   bool
-	model  string
-	tokens int
-	tools  int
-	rounds int
+	busy          bool
+	model         string
+	tokens        int
+	inputTokens   int
+	outputTokens  int
+	contextTokens int
+	cost          float64
+	tools         int
+	rounds        int
 	// busy is true while the agent is generating or running tools. finished
 	// prevents input after the agent goroutine has stopped. statusHint is a
 	// short, transient explanation shown when a draft cannot be sent yet.
-	finished   bool
-	failed     bool
-	streamDone bool
-	resultSeen bool
-	resultErr  error
-	statusHint string
-	activity   string
-	busySince  time.Time
+	finished       bool
+	failed         bool
+	streamDone     bool
+	resultSeen     bool
+	resultErr      error
+	statusHint     string
+	activity       string
+	activityDetail string
+	lastToolError  bool
+	recovering     bool
+	lastError      string
+	busySince      time.Time
+	imeCommitAt    time.Time
+
+	toolTimeline  []toolTimelineEntry
+	toolsExpanded bool
+	planDone      int
+	planTotal     int
+	planCurrent   string
 
 	// Popup
 	popup *popupState
@@ -127,10 +144,19 @@ type popupItem struct {
 func NewChat(a *agent.Agent) *ChatModel {
 	ta := textarea.New()
 	ta.Placeholder = chatBusyPlaceholder
-	ta.Prompt = "❯ "
+	// Reserve two rows for Windows IME composition, but draw the prompt only
+	// on the first row. textarea.Prompt is repeated for every visible row.
+	ta.Prompt = ""
+	ta.SetPromptFunc(2, func(lineIndex int) string {
+		if lineIndex == 0 {
+			return "❯ "
+		}
+		return "  "
+	})
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
-	ta.SetHeight(1)
+	ta.SetHeight(chatInputRows)
+	ta.MaxHeight = chatInputRows
 	ta.Focus()
 	// Trim the default styling noise.
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
@@ -145,31 +171,53 @@ func NewChat(a *agent.Agent) *ChatModel {
 		chatDimStyle.Render(fmt.Sprintf("  │  %s · %s", workspace, a.Config.Model)),
 		chatDimStyle.Render("  │"),
 		"  │  Describe what you want to build, fix, or understand.",
-		chatDimStyle.Render("  ╰─ / commands · @ files · Ctrl+D exit"),
+		chatDimStyle.Render("  ╰─ / commands · @ files · PgUp/PgDn scroll · Ctrl+C interrupt · Ctrl+D exit"),
+	}
+	if len(a.Messages) == 0 && strings.TrimSpace(a.Intent) != "" {
+		welcome = append(welcome, "", chatUserStyle.Render("  ◆ you"))
+		for _, line := range strings.Split(strings.TrimSpace(a.Intent), "\n") {
+			welcome = append(welcome, "    "+line)
+		}
+	}
+	if history := renderResumeHistory(a.Messages); len(history) > 0 {
+		welcome = append(welcome, "", chatDimStyle.Render(fmt.Sprintf("  ── resumed · %d saved messages ──", len(a.Messages))), "")
+		welcome = append(welcome, history...)
 	}
 
-	return &ChatModel{
-		agent:     a,
-		agentIn:   make(chan string, 1),
-		readyCh:   make(chan struct{}, 1),
-		agentDone: make(chan struct{}, 1),
-		resultCh:  make(chan error, 1),
-		confirmCh: make(chan bool),
-		textarea:  ta,
-		spinner:   spin,
-		lines:     welcome,
-		logDirty:  true,
-		model:     a.Config.Model,
-		busy:      true,
-		activity:  "Preparing project context",
-		busySince: time.Now(),
+	model := &ChatModel{
+		agent:        a,
+		agentIn:      make(chan string, 1),
+		readyCh:      make(chan struct{}, 1),
+		agentDone:    make(chan struct{}, 1),
+		resultCh:     make(chan error, 1),
+		confirmCh:    make(chan bool),
+		confirmReqCh: make(chan string),
+		eventCh:      make(chan agent.Event, 128),
+		textarea:     ta,
+		spinner:      spin,
+		lines:        welcome,
+		logDirty:     true,
+		model:        a.Config.Model,
+		busy:         true,
+		activity:     "Preparing project context",
+		busySince:    time.Now(),
 	}
+	for _, item := range a.TodoList {
+		model.planTotal++
+		if item.Status == "completed" {
+			model.planDone++
+		}
+		if item.Status == "in_progress" && model.planCurrent == "" {
+			model.planCurrent = item.Content
+		}
+	}
+	return model
 }
 
 // ── Bubble Tea ──────────────────────────────────────────────────────────────
 
 func (m *ChatModel) Init() tea.Cmd {
-	return tea.Batch(m.waitForAgentLine(), m.waitForAgentReady(), m.waitForAgentResult(), m.statusTick(), m.waitForConfirm(), m.spinner.Tick, textarea.Blink)
+	return tea.Batch(m.waitForAgentLine(), m.waitForAgentReady(), m.waitForAgentResult(), m.waitForAgentEvent(), m.statusTick(), m.waitForConfirm(), m.spinner.Tick, textarea.Blink)
 }
 
 func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -219,9 +267,17 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentReadyMsg:
 		if !m.finished {
 			m.busy = false
-			m.statusHint = ""
-			m.activity = ""
-			m.textarea.Placeholder = chatReadyPlaceholder
+			if m.recovering {
+				m.statusHint = "request failed · /retry or type a new message"
+				m.activity = "Waiting for recovery"
+				m.textarea.Placeholder = "Request failed — type /retry, or send a new instruction..."
+			} else {
+				m.statusHint = ""
+				m.activity = ""
+				m.textarea.Placeholder = chatReadyPlaceholder
+			}
+			m.activityDetail = ""
+			m.lastToolError = false
 			m.refreshViewport()
 			m.viewport.GotoBottom()
 		}
@@ -241,10 +297,14 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusTickMsg:
 		if m.agent.Stats != nil {
-			in, out, tools, rounds := m.agent.Stats.Snapshot()
+			in, out, contextTokens, tools, rounds, cost := m.agent.Stats.Snapshot()
+			m.inputTokens = in
+			m.outputTokens = out
+			m.contextTokens = contextTokens
 			m.tokens = in + out
 			m.tools = tools
 			m.rounds = rounds
+			m.cost = cost
 		}
 		m.model = m.agent.Config.Model
 		cmds = append(cmds, m.statusTick())
@@ -252,6 +312,10 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case confirmRequestMsg:
 		m.confirmPopup(msg.cmd)
 		cmds = append(cmds, m.waitForConfirm())
+
+	case agentEventMsg:
+		m.handleAgentEvent(msg.event)
+		cmds = append(cmds, m.waitForAgentEvent())
 	}
 
 	// Let the textarea handle its own key events (editing) when no popup.
@@ -262,6 +326,43 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *ChatModel) handleAgentEvent(event agent.Event) {
+	wasAtBottom := !m.ready || m.viewport.AtBottom()
+	m.recordToolEvent(event)
+	switch event.Kind {
+	case agent.EventPhase:
+		m.activity = event.Activity
+		m.activityDetail = ""
+	case agent.EventToolStarted:
+		m.activity = event.Activity
+		m.activityDetail = event.Detail
+		m.lastToolError = false
+	case agent.EventToolFinished:
+		m.activity = event.Activity
+		m.activityDetail = event.Detail
+		m.lastToolError = event.IsError
+	case agent.EventError:
+		m.recovering = true
+		m.busy = false
+		m.lastError = event.Result
+		m.statusHint = "request failed · /retry or type a new message"
+		m.activity = "Waiting for recovery"
+		m.activityDetail = ""
+		m.textarea.Placeholder = "Request failed — type /retry, or send a new instruction..."
+		m.lines = append(m.lines,
+			"",
+			chatErrorStyle.Render("  ╭─ ✕ Request failed"),
+			chatErrorStyle.Render("  │  ")+event.Result,
+			chatDimStyle.Render("  ╰─ /retry tries the same request · a new message changes direction"),
+		)
+		m.logDirty = true
+	}
+	m.refreshViewport()
+	if wasAtBottom && m.ready {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m *ChatModel) finishAgent(err error) {
@@ -295,8 +396,8 @@ func (m *ChatModel) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	inputH := 3  // textarea border (2) + 1 line
-	statusH := 1 // status bar
+	inputH := chatInputRows + 2 // textarea rows + top/bottom border
+	statusH := 2                // primary status + session metrics
 	vpH := m.height - inputH - statusH
 	if vpH < 3 {
 		vpH = 3
@@ -325,6 +426,12 @@ func (m *ChatModel) refreshViewport() {
 		m.logDirty = false
 	}
 	content := m.renderedLog
+	if timeline := m.renderToolTimeline(); timeline != "" {
+		if content != "" {
+			content += "\n\n"
+		}
+		content += timeline
+	}
 	if m.busy && !m.finished {
 		if content != "" {
 			content += "\n\n"
@@ -340,7 +447,15 @@ func (m *ChatModel) renderActivityLine() string {
 		activity = "Thinking"
 	}
 	elapsed := time.Since(m.busySince).Round(100 * time.Millisecond)
-	return chatDimStyle.Render("  ╰─ ") + m.spinner.View() + " " + chatPromptStyle.Render(activity) + chatDimStyle.Render(" · "+elapsed.String())
+	activityStyle := chatPromptStyle
+	if m.lastToolError {
+		activityStyle = chatErrorStyle
+	}
+	line := chatDimStyle.Render("  ╰─ ") + m.spinner.View() + " " + activityStyle.Render(activity)
+	if m.activityDetail != "" {
+		line += chatDimStyle.Render(" · " + m.activityDetail)
+	}
+	return line + chatDimStyle.Render(" · "+elapsed.String())
 }
 
 func wrapChatContent(content string, width int) string {
@@ -397,20 +512,52 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		if m.textarea.Value() == "" {
-			m.quitting = true
-			return m, tea.Quit
+		if m.textarea.Value() != "" {
+			m.textarea.Reset()
+			m.statusHint = "draft cleared"
+			return m, nil
 		}
-		m.textarea.Reset()
-		return m, nil
-
-	case tea.KeyCtrlD:
+		if m.busy && !m.finished {
+			m.agent.CancelRequest()
+			m.statusHint = "interrupt requested"
+			m.activity = "Stopping current action"
+			m.activityDetail = ""
+			return m, nil
+		}
 		m.quitting = true
 		return m, tea.Quit
+
+	case tea.KeyCtrlD:
+		m.agent.Cancel()
+		m.quitting = true
+		return m, tea.Quit
+
+	case tea.KeyCtrlO:
+		if len(m.toolTimeline) == 0 {
+			m.statusHint = "no tool calls yet"
+			return m, nil
+		}
+		m.toolsExpanded = !m.toolsExpanded
+		if m.toolsExpanded {
+			m.statusHint = "tool details expanded"
+		} else {
+			m.statusHint = "tool details collapsed"
+		}
+		m.refreshViewport()
+		m.viewport.GotoBottom()
+		return m, nil
 
 	case tea.KeyEnter:
 		text := strings.TrimSpace(m.textarea.Value())
 		if text == "" {
+			return m, nil
+		}
+		// Some Windows terminals emit Enter immediately after an IME commits
+		// candidate text. Consume that Enter once so choosing “你好” does not
+		// accidentally submit the whole chat message.
+		if !m.imeCommitAt.IsZero() && time.Since(m.imeCommitAt) < 250*time.Millisecond {
+			m.imeCommitAt = time.Time{}
+			m.statusHint = "IME text committed — press Enter again to send"
 			return m, nil
 		}
 		if m.finished {
@@ -435,6 +582,11 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	default:
+		if msg.Type == tea.KeyRunes && !msg.Paste && containsNonASCII(msg.Runes) {
+			m.imeCommitAt = time.Now()
+		} else {
+			m.imeCommitAt = time.Time{}
+		}
 		// Let the textarea handle editing (arrows, backspace, runes, etc.)
 		var cmd tea.Cmd
 		m.textarea, cmd = m.textarea.Update(msg)
@@ -449,6 +601,15 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
+}
+
+func containsNonASCII(runes []rune) bool {
+	for _, r := range runes {
+		if r > 127 {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *ChatModel) handleSlashCommand(text string) (tea.Model, tea.Cmd) {
@@ -467,8 +628,37 @@ func (m *ChatModel) handleSlashCommand(text string) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		m.textarea.Reset()
 		return m, nil
+	case "/retry":
+		if !m.recovering {
+			m.statusHint = "nothing to retry"
+			m.textarea.Reset()
+			return m, nil
+		}
+		return m.retryLastRequest()
 	default:
 		m.sendUserMessage(text, false)
+		return m, nil
+	}
+}
+
+func (m *ChatModel) retryLastRequest() (tea.Model, tea.Cmd) {
+	select {
+	case m.agentIn <- "/retry":
+		m.recovering = false
+		m.busy = true
+		m.statusHint = "retrying last request"
+		m.activity = "Retrying request"
+		m.activityDetail = ""
+		m.busySince = time.Now()
+		m.textarea.Placeholder = chatBusyPlaceholder
+		m.lines = append(m.lines, "", chatPromptStyle.Render("  ↻ retrying last request"))
+		m.logDirty = true
+		m.refreshViewport()
+		m.viewport.GotoBottom()
+		m.textarea.Reset()
+		return m, nil
+	default:
+		m.statusHint = "retry channel is not ready"
 		return m, nil
 	}
 }
@@ -483,8 +673,12 @@ func (m *ChatModel) sendUserMessage(text string, leadingBlank bool) bool {
 			m.lines = append(m.lines, "")
 		}
 		m.busy = true
+		m.recovering = false
+		m.lastError = ""
 		m.statusHint = ""
 		m.activity = "Thinking"
+		m.activityDetail = ""
+		m.lastToolError = false
 		m.busySince = time.Now()
 		m.textarea.Placeholder = chatBusyPlaceholder
 		m.lines = append(m.lines, chatUserStyle.Render("  ◆ you"))
@@ -501,297 +695,6 @@ func (m *ChatModel) sendUserMessage(text string, leadingBlank bool) bool {
 		m.statusHint = "draft held — input channel is not ready"
 		return false
 	}
-}
-
-// ── Popup ───────────────────────────────────────────────────────────────────
-
-func (m *ChatModel) showCommandPopup() (tea.Model, tea.Cmd) {
-	items := make([]popupItem, 0, len(agent.SlashCommands))
-	for _, sc := range agent.SlashCommands {
-		items = append(items, popupItem{id: sc.Name, label: sc.Name, desc: sc.Desc})
-	}
-	m.popup = &popupState{kind: "commands", items: items, title: "Slash Commands"}
-	m.popup.applyFilter("")
-	return m, nil
-}
-
-func (m *ChatModel) showModelPopup() (tea.Model, tea.Cmd) {
-	models := agent.ModelsForProvider(m.agent.Config.Provider)
-	if len(models) == 0 {
-		m.lines = append(m.lines, chatDimStyle.Render("  no model list for provider: "+m.agent.Config.Provider))
-		m.logDirty = true
-		m.refreshViewport()
-		return m, nil
-	}
-	items := make([]popupItem, 0, len(models))
-	for _, mo := range models {
-		items = append(items, popupItem{id: mo.ID, label: mo.ID, desc: mo.Label})
-	}
-	m.popup = &popupState{kind: "models", items: items, title: "Models (" + m.agent.Config.Provider + ")"}
-	m.popup.applyFilter("")
-	return m, nil
-}
-
-// showFilePopup scans the working directory for files and opens a fuzzy picker.
-func (m *ChatModel) showFilePopup() (tea.Model, tea.Cmd) {
-	files := m.scanFiles()
-	if len(files) == 0 {
-		return m, nil
-	}
-	items := make([]popupItem, 0, len(files))
-	for _, f := range files {
-		items = append(items, popupItem{id: f, label: f})
-	}
-	m.popup = &popupState{kind: "files", items: items, title: "Files (@)"}
-	m.popup.applyFilter("")
-	return m, nil
-}
-
-// scanFiles walks the agent workdir collecting relative file paths (capped),
-// skipping .git, node_modules, and .boltcode.
-func (m *ChatModel) scanFiles() []string {
-	var out []string
-	const max = 2000
-	root := m.agent.Workdir
-	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			n := d.Name()
-			if n == ".git" || n == "node_modules" || n == ".boltcode" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if len(out) >= max {
-			return filepath.SkipAll
-		}
-		rel, e := filepath.Rel(root, p)
-		if e == nil {
-			out = append(out, filepath.ToSlash(rel))
-		}
-		return nil
-	})
-	return out
-}
-
-// ── Fuzzy filtering ─────────────────────────────────────────────────────────
-
-// applyFilter recomputes the filtered index list for the given query using a
-// subsequence match, and resets the selection.
-func (p *popupState) applyFilter(query string) {
-	p.filter = query
-	p.filtered = p.filtered[:0]
-	q := strings.ToLower(query)
-	for i, it := range p.items {
-		if q == "" || fuzzyMatch(strings.ToLower(it.label), q) || fuzzyMatch(strings.ToLower(it.desc), q) {
-			p.filtered = append(p.filtered, i)
-		}
-	}
-	p.selected = 0
-}
-
-// fuzzyMatch reports whether all runes of query appear in s in order
-// (subsequence match). Both should already be lowercased.
-func fuzzyMatch(s, query string) bool {
-	if query == "" {
-		return true
-	}
-	qi := 0
-	qr := []rune(query)
-	for _, r := range s {
-		if r == qr[qi] {
-			qi++
-			if qi == len(qr) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// currentSelection returns the popupItem currently highlighted, or false if
-// the filtered list is empty.
-func (p *popupState) currentSelection() (popupItem, bool) {
-	if len(p.filtered) == 0 || p.selected < 0 || p.selected >= len(p.filtered) {
-		return popupItem{}, false
-	}
-	return p.items[p.filtered[p.selected]], true
-}
-
-// confirmPopup shows a yes/no/allow confirmation for a shell command.
-func (m *ChatModel) confirmPopup(cmd string) {
-	m.popup = &popupState{
-		kind:   "confirm",
-		title:  "Run command?",
-		prompt: cmd,
-		items: []popupItem{
-			{id: "yes", label: "Yes", desc: "run this command once"},
-			{id: "allow", label: "Allow all", desc: "run all commands this session"},
-			{id: "no", label: "No", desc: "skip this command"},
-		},
-	}
-	m.popup.applyFilter("")
-}
-
-func (m *ChatModel) handlePopupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	p := m.popup
-	switch msg.Type {
-	case tea.KeyEsc, tea.KeyCtrlC:
-		// A confirm popup can't be dismissed with Esc — that would leave the
-		// agent goroutine blocked waiting for an answer. Treat Esc as "no".
-		if p.kind == "confirm" {
-			m.popup = nil
-			m.confirmCh <- false
-			return m, nil
-		}
-		m.popup = nil
-		m.textarea.Reset()
-		return m, nil
-
-	case tea.KeyUp:
-		if p.selected > 0 {
-			p.selected--
-		}
-		return m, nil
-
-	case tea.KeyDown:
-		if p.selected < len(p.filtered)-1 {
-			p.selected++
-		}
-		return m, nil
-
-	case tea.KeyBackspace:
-		if p.kind != "confirm" && len(p.filter) > 0 {
-			r := []rune(p.filter)
-			p.applyFilter(string(r[:len(r)-1]))
-		}
-		return m, nil
-
-	case tea.KeyEnter:
-		sel, ok := p.currentSelection()
-		if !ok {
-			return m, nil
-		}
-		kind := p.kind
-		m.popup = nil
-		m.textarea.Reset()
-		return m.applyPopupSelection(kind, sel)
-
-	case tea.KeyRunes, tea.KeySpace:
-		if p.kind == "confirm" {
-			return m, nil // confirm popup uses arrows only
-		}
-		p.applyFilter(p.filter + msg.String())
-		return m, nil
-	}
-	return m, nil
-}
-
-// applyPopupSelection executes the action for a chosen popup item.
-func (m *ChatModel) applyPopupSelection(kind string, sel popupItem) (tea.Model, tea.Cmd) {
-	switch kind {
-	case "models":
-		m.agent.Config.Model = sel.id
-		m.model = sel.id
-		m.lines = append(m.lines, chatGreenStyle.Render("  ✓ switched to: ")+sel.id)
-		m.logDirty = true
-		m.refreshViewport()
-		m.viewport.GotoBottom()
-		return m, nil
-
-	case "commands":
-		if sel.id == "/exit" {
-			m.quitting = true
-			return m, tea.Quit
-		}
-		return m.handleSlashCommand(sel.id)
-
-	case "files":
-		// Insert the "@path" reference into the textarea.
-		cur := m.textarea.Value()
-		if strings.HasSuffix(cur, "@") {
-			cur = cur[:len(cur)-1]
-		}
-		m.textarea.SetValue(cur + "@" + sel.id + " ")
-		return m, nil
-
-	case "confirm":
-		switch sel.id {
-		case "yes":
-			m.confirmCh <- true
-		case "allow":
-			m.agent.AutoAllow = true
-			m.confirmCh <- true
-		default:
-			m.confirmCh <- false
-		}
-		return m, nil
-	}
-	return m, nil
-}
-
-// ── Channel listeners ───────────────────────────────────────────────────────
-
-// confirmReqCh carries command-confirmation requests from the agent goroutine
-// to the TUI. Buffered so the agent's ConfirmFn doesn't block on send before
-// the TUI's listener is ready.
-var confirmReqCh chan string
-
-func (m *ChatModel) waitForConfirm() tea.Cmd {
-	return func() tea.Msg {
-		cmd, ok := <-confirmReqCh
-		if !ok {
-			return nil
-		}
-		return confirmRequestMsg{cmd: cmd}
-	}
-}
-
-func (m *ChatModel) waitForAgentLine() tea.Cmd {
-	ch := m.lineCh
-	return func() tea.Msg {
-		line, ok := <-ch
-		if !ok {
-			return agentDoneMsg{}
-		}
-		return agentLineMsg{text: line}
-	}
-}
-
-func (m *ChatModel) waitForAgentReady() tea.Cmd {
-	return func() tea.Msg {
-		<-m.readyCh
-		return agentReadyMsg{}
-	}
-}
-
-func (m *ChatModel) waitForAgentResult() tea.Cmd {
-	return func() tea.Msg {
-		return agentResultMsg{err: <-m.resultCh}
-	}
-}
-
-// nextAgentInput is called by the agent goroutine whenever it has completely
-// finished the current turn. Signalling readiness before blocking on agentIn
-// gives the Bubble Tea loop authoritative control over whether Enter submits.
-func (m *ChatModel) nextAgentInput() string {
-	select {
-	case m.readyCh <- struct{}{}:
-	default:
-	}
-	line, ok := <-m.agentIn
-	if !ok {
-		return "exit"
-	}
-	return line
-}
-
-func (m *ChatModel) statusTick() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg {
-		return statusTickMsg{}
-	})
 }
 
 // ── View ────────────────────────────────────────────────────────────────────
@@ -821,30 +724,77 @@ func (m *ChatModel) renderStatusBar() string {
 		left = chatErrorStyle.Render("● failed")
 	} else if m.finished {
 		left = chatDimStyle.Render("● stopped")
+	} else if m.recovering {
+		left = chatErrorStyle.Render("● recover")
 	} else if m.busy {
 		activity := m.activity
 		if activity == "" {
 			activity = "Thinking"
 		}
 		left = m.spinner.View() + " " + chatPromptStyle.Render(activity)
+		if m.activityDetail != "" {
+			left += chatDimStyle.Render(" · " + m.activityDetail)
+		}
 	} else {
 		left = chatGreenStyle.Render("● ready")
 	}
 	if m.statusHint != "" {
 		left += chatDimStyle.Render(" · " + m.statusHint)
 	}
-	mid := chatDimStyle.Render(fmt.Sprintf("%d tokens · %d tools · %d rounds", m.tokens, m.tools, m.rounds))
-	right := chatDimStyle.Render(m.model)
-	content := left + "  │  " + mid + "  │  " + right
-	if m.width > 0 && ansi.StringWidth(content) > m.width {
-		content = ansi.Truncate(content, m.width, "…")
+	permission := "confirm"
+	if m.agent.AutoAllow {
+		permission = "auto-allow"
 	}
-	// Pad to width.
-	w := lipgloss.Width(content)
-	if w < m.width {
-		content += strings.Repeat(" ", m.width-w)
+	scroll := 100
+	if m.ready && !m.viewport.AtBottom() {
+		scroll = int(m.viewport.ScrollPercent() * 100)
 	}
-	return statusBarStyle.Width(m.width).Render(content)
+	right := chatDimStyle.Render(fmt.Sprintf("%s · %s · scroll %d%%", m.model, permission, scroll))
+	primary := fitStatusLine(left+"  │  "+right, m.width)
+
+	window := agent.ModelContextWindow(m.model)
+	contextPct := 0
+	if window > 0 {
+		contextPct = int(float64(m.contextTokens) / float64(window) * 100)
+	}
+	plan := "plan —"
+	if m.planTotal > 0 {
+		plan = fmt.Sprintf("plan %d/%d", m.planDone, m.planTotal)
+		if m.planCurrent != "" {
+			plan += " · " + m.planCurrent
+		}
+	}
+	secondary := fmt.Sprintf("context %d%% · %s/%s  │  %s  │  $%.4f  │  %d tools · %d rounds  │  %s/%s in/out  │  Ctrl+O details",
+		contextPct, formatMetricTokens(m.contextTokens), formatMetricTokens(window), plan, m.cost, m.tools, m.rounds,
+		formatMetricTokens(m.inputTokens), formatMetricTokens(m.outputTokens))
+	secondary = fitStatusLine(chatDimStyle.Render(secondary), m.width)
+	return lipgloss.JoinVertical(lipgloss.Left,
+		statusBarStyle.Width(m.width).Render(primary),
+		chatDimStyle.Background(lipgloss.Color("234")).Width(m.width).Render(secondary),
+	)
+}
+
+func formatMetricTokens(tokens int) string {
+	if tokens >= 1_000_000 {
+		return fmt.Sprintf("%.1fm", float64(tokens)/1_000_000)
+	}
+	if tokens >= 10_000 {
+		return fmt.Sprintf("%dk", tokens/1000)
+	}
+	if tokens >= 1_000 {
+		return fmt.Sprintf("%.1fk", float64(tokens)/1000)
+	}
+	return fmt.Sprintf("%d", tokens)
+}
+
+func fitStatusLine(content string, width int) string {
+	if width > 0 && ansi.StringWidth(content) > width {
+		content = ansi.Truncate(content, width, "…")
+	}
+	if pad := width - lipgloss.Width(content); pad > 0 {
+		content += strings.Repeat(" ", pad)
+	}
+	return content
 }
 
 func normalizeAgentLine(line string) (clean string, drop bool) {
@@ -910,86 +860,6 @@ func (m *ChatModel) renderPopupOverlay() string {
 	items = append(items, chatDimStyle.Render("type to filter · ↑↓ navigate · Enter select · Esc cancel"))
 	popup := popupStyle.Render(strings.Join(items, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, popup)
-}
-
-// ── Run ─────────────────────────────────────────────────────────────────────
-
-// RunChat starts the Bubble Tea chat TUI. The agent runs in a goroutine with
-// its stdout captured to a pipe; ANSI-colored lines are forwarded to the TUI
-// via a channel and rendered in the scrollable viewport. Bubble Tea renders to
-// the real stdout (via tea.WithOutput). The input box stays visible and
-// editable at all times.
-func RunChat(a *agent.Agent) error {
-	agent.SetNoSpinner(true)
-	agent.SetTUIMode(true)
-	defer func() {
-		agent.SetNoSpinner(false)
-		agent.SetTUIMode(false)
-	}()
-
-	w, h, _ := term.GetSize(os.Stdout.Fd())
-
-	model := NewChat(a)
-	model.lineCh = make(chan string, 512)
-	if w > 0 {
-		model.width = w
-	}
-	if h > 0 {
-		model.height = h
-	}
-	model.layout()
-
-	// Wire command confirmation through the TUI: the agent's ConfirmFn sends
-	// the command to the TUI (which pops a confirm dialog) and blocks on the
-	// answer. Skipped when AutoAllow is already set.
-	confirmReqCh = make(chan string)
-	a.ConfirmFn = func(cmd string) bool {
-		confirmReqCh <- cmd
-		return <-model.confirmCh
-	}
-
-	realStdout := os.Stdout
-
-	r, wPipe, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	os.Stdout = wPipe
-
-	// Pipe reader: forward each agent output line (colors preserved) to the TUI.
-	go func() {
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 0, 1<<20), 4<<20)
-		for scanner.Scan() {
-			line := scanner.Text()
-			// Keep intentional blank lines so assistant paragraphs and tool cards
-			// retain visual rhythm. Only discard control-only spinner artifacts.
-			clean, drop := normalizeAgentLine(line)
-			if drop {
-				continue
-			}
-			select {
-			case model.lineCh <- clean:
-			default:
-			}
-		}
-		close(model.lineCh)
-	}()
-
-	// Agent goroutine.
-	go func() {
-		runErr := a.Run(model.nextAgentInput)
-		model.resultCh <- runErr
-		wPipe.Close()
-	}()
-
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithOutput(realStdout))
-	_, err = p.Run()
-
-	close(model.agentIn)
-	os.Stdout = realStdout
-	wPipe.Close()
-	return err
 }
 
 // stripCR removes carriage returns and the ANSI clear-line sequence so spinner

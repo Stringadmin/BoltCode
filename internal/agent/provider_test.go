@@ -103,3 +103,42 @@ func TestParseOpenAIStreamRejectsInvalidToolArguments(t *testing.T) {
 		t.Fatal("invalid streamed tool arguments should return an error")
 	}
 }
+
+func TestParseOpenAIStreamAssemblesFragmentedParallelTools(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":"}},{"index":1,"id":"call_2","function":{"name":"list_files","arguments":"{\"path\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"go.mod\"}"}},{"index":1,"function":{"arguments":"\"internal\"}"}}]}}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n")
+	a := &Agent{}
+	data, _, err := a.parseOpenAIStream(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []map[string]interface{}
+	if err := json.Unmarshal(data, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 2 || blocks[0]["id"] != "call_1" || blocks[1]["id"] != "call_2" {
+		t.Fatalf("parallel tool blocks = %#v", blocks)
+	}
+	if blocks[0]["input"].(map[string]interface{})["path"] != "go.mod" || blocks[1]["input"].(map[string]interface{})["path"] != "internal" {
+		t.Fatalf("fragmented arguments assembled incorrectly: %#v", blocks)
+	}
+}
+
+func TestOpenAIToolErrorIsVisibleToModel(t *testing.T) {
+	messages := []Message{
+		{Role: "assistant", Content: []interface{}{
+			map[string]interface{}{"type": "tool_use", "id": "call_e", "name": "read_file", "input": map[string]interface{}{}},
+		}},
+		{Role: "user", Content: []map[string]interface{}{
+			{"type": "tool_result", "tool_use_id": "call_e", "content": "file not found", "is_error": true},
+		}},
+	}
+	out := convertMessagesToOpenAI("system", messages)
+	if got := out[2]["content"]; got != "Tool error: file not found" {
+		t.Fatalf("OpenAI error result content = %q", got)
+	}
+}

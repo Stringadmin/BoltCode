@@ -33,6 +33,7 @@ var SlashCommands = []SlashCommand{
 	{"/clear", "clear conversation history"},
 	{"/compact", "summarize old messages (LLM)"},
 	{"/context", "show context-usage bar"},
+	{"/retry", "retry the last failed API request"},
 	{"/restrict", "re-enable command confirmation (undo auto-allow)"},
 	{"/triage", "review codebase, prioritized items"},
 	{"/sessions", "list saved conversations"},
@@ -65,6 +66,7 @@ func (a *Agent) handleSlashCommand(input string) bool {
 		fmt.Println("    /clear       clear conversation history")
 		fmt.Println("    /compact     summarize old messages (LLM) to free context")
 		fmt.Println("    /context     show context-usage bar vs model window")
+		fmt.Println("    /retry       retry the last failed API request")
 		fmt.Println("    /restrict    re-enable command confirmation (undo auto-allow)")
 		fmt.Println("    /triage [worktree|repo]  review codebase, give prioritized action items")
 		fmt.Println("    /sessions    list saved conversations (resume with boltcode --resume <id>)")

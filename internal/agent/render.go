@@ -177,6 +177,12 @@ func renderMarkdown(text string) string {
 	return strings.Join(out, "\n")
 }
 
+// RenderMarkdownForTUI exposes the same terminal markdown renderer to the
+// resume UI so saved assistant messages look identical to live responses.
+func RenderMarkdownForTUI(text string) string {
+	return renderMarkdown(text)
+}
+
 // renderInline handles **bold**, `code`, and *italic* within a line.
 func renderInline(s string) string {
 	var result strings.Builder
@@ -428,13 +434,13 @@ func printToolHeader(icon, action, detail string) {
 }
 
 // printToolFooter shows tool result status with a colored glyph.
-func printToolFooter(success bool, msg string) {
+func (a *Agent) printToolFooter(success bool, msg string) {
 	if success {
 		fmt.Printf("    "+ansiDarkGray+"╰─"+ansiReset+" "+ansiGreen+"✓"+ansiReset+" "+ansiGray+"%s"+ansiReset+"\n", msg)
 	} else {
 		fmt.Printf("    "+ansiDarkGray+"╰─"+ansiReset+" "+ansiRed+"✗"+ansiReset+" "+ansiRed+"%s"+ansiReset+"\n", msg)
 	}
-	if tuiMode {
+	if a.UIMode {
 		fmt.Println()
 	} else {
 		fmt.Print("  \033[38;5;75m❯\033[0m\n") // persistent prompt (shell mode only)

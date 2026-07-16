@@ -116,6 +116,9 @@ For any multi-step task (3+ steps), create a todo list FIRST with todo_write, ma
 // If a.Messages is pre-populated (a resumed session), the initial project-scan
 // greeting is skipped and the conversation continues from where it left off.
 func (a *Agent) Run(inputFn func() string) error {
+	sessionCtx := a.beginSession()
+	defer a.endSession()
+
 	// Build the system prompt. Using strings.NewReplacer (not fmt.Sprintf)
 	// means a literal "%" in the 100-line prompt — e.g. a future "100% width"
 	// CSS note — won't be misread as a format verb and garble the prompt.
@@ -148,9 +151,11 @@ func (a *Agent) Run(inputFn func() string) error {
 			initParts = append(initParts, "## Current Project\n"+projectCtx)
 		}
 	} else {
-		fmt.Println()
-		fmt.Printf("  "+ansiDarkGray+"↻ resumed session"+ansiReset+" %s"+ansiDarkGray+" · %d messages · continue where you left off"+ansiReset+"\n\n",
-			a.SessionID, len(a.Messages))
+		if !a.UIMode {
+			fmt.Println()
+			fmt.Printf("  "+ansiDarkGray+"↻ resumed session"+ansiReset+" %s"+ansiDarkGray+" · %d messages · continue where you left off"+ansiReset+"\n\n",
+				a.SessionID, len(a.Messages))
+		}
 		// Auto-compact if the resumed session is large enough to risk
 		// overflowing the context window on the first API call.
 		window := modelContextWindow(a.Config.Model)
@@ -166,7 +171,7 @@ func (a *Agent) Run(inputFn func() string) error {
 		}
 	}
 
-	if tuiMode {
+	if a.UIMode {
 		// The TUI renders its own local welcome panel. Wait for the first real
 		// instruction instead of spending an API round on a generated greeting;
 		// this also makes the UI's ready handshake authoritative from turn one.
@@ -196,26 +201,70 @@ func (a *Agent) Run(inputFn func() string) error {
 
 	var sessionErr error
 	for round := 0; round < 100; round++ {
+		if sessionCtx.Err() != nil {
+			break
+		}
+		if a.consumeInterrupt() {
+			a.emitPhase("Interrupted")
+			input, ok := a.waitForUserInput(inputFn)
+			if !ok {
+				break
+			}
+			a.Messages = append(a.Messages, Message{Role: "user", Content: input})
+			continue
+		}
 		// Show spinner while waiting for API
-		spin := NewSpinner("thinking...")
-		spin.Start()
+		var spin *Spinner
+		if !a.NoSpinner {
+			spin = NewSpinner("thinking...")
+			spin.Start()
+		}
+		a.emitPhase("Thinking")
 
 		resp, usage, err := a.callAPI(system)
 
-		spin.Stop()
-		if !tuiMode {
+		if spin != nil {
+			spin.Stop()
+		}
+		if !a.UIMode {
 			fmt.Print("  ❯\n") // prompt stays visible after spinner (shell mode)
 		}
 
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
+				if sessionCtx.Err() != nil {
+					break
+				}
+				a.consumeInterrupt()
 				// User pressed Ctrl+C — don't kill the session, just abort this
 				// round and return to the input prompt.
 				fmt.Println("  " + ansiYellow + "⚡ interrupted — type to continue, or 'exit' to quit" + ansiReset)
 				a.ToolErrorCount = 0
+				a.emitPhase("Interrupted")
+				input, ok := a.waitForUserInput(inputFn)
+				if !ok {
+					break
+				}
+				a.Messages = append(a.Messages, Message{Role: "user", Content: input})
 				continue
 			}
-			return fmt.Errorf("API error: %w", err)
+			recoveryErr := fmt.Errorf("API error: %w", err)
+			a.emit(Event{Kind: EventError, Activity: "Request failed", Result: recoveryErr.Error(), IsError: true})
+			if !a.UIMode {
+				fmt.Println("  " + ansiRed + "✗ " + recoveryErr.Error() + ansiReset)
+				fmt.Println("  " + ansiDarkGray + "type /retry to try again, or enter a new instruction" + ansiReset)
+			}
+			input, retry, ok := a.waitForRecoveryInput(inputFn)
+			if !ok {
+				break
+			}
+			if retry {
+				a.emitPhase("Retrying request")
+				continue
+			}
+			a.Messages = append(a.Messages, Message{Role: "user", Content: input})
+			a.ToolErrorCount = 0
+			continue
 		}
 
 		// Track token usage. LastInput (from the most recent API response) is
@@ -234,7 +283,7 @@ func (a *Agent) Run(inputFn func() string) error {
 
 			// In TUI mode the status bar shows tokens/tools/rounds/context, so
 			// skip the inline footer to avoid duplicate noise.
-			if !tuiMode {
+			if !a.UIMode {
 				fmt.Println()
 				fmt.Println(divider())
 				fmt.Printf("  "+ansiDarkGray+"⏱ %-8s  ◆ %d tokens  🔧 %d tools  🔄 %d rounds"+ansiReset+"\n",
@@ -259,13 +308,28 @@ func (a *Agent) Run(inputFn func() string) error {
 		// Execute tools with self-repair logic
 		var results []map[string]interface{}
 		hasError := false
-		for _, tc := range toolCalls {
+		interrupted := false
+		for index, tc := range toolCalls {
 			a.Stats.AddToolCall()
+			started := a.toolEvent(tc)
+			a.emit(started)
 			a.printToolUse(tc)
 			start := time.Now()
 			result := a.ExecTool(tc)
 			elapsed := time.Since(start)
 			a.printToolResult(tc, result, elapsed)
+			finishedEvent := Event{
+				Kind:     EventToolFinished,
+				Activity: "Reviewing tool result",
+				ToolID:   tc.ID,
+				ToolName: tc.Name,
+				Detail:   started.Detail,
+				Result:   result.Content,
+				IsError:  result.IsError,
+				Duration: elapsed,
+			}
+			a.addPlanState(&finishedEvent)
+			a.emit(finishedEvent)
 			if result.IsError {
 				hasError = true
 			}
@@ -275,8 +339,33 @@ func (a *Agent) Run(inputFn func() string) error {
 				"content":     result.Content,
 				"is_error":    result.IsError,
 			})
+			interrupted = a.consumeInterrupt()
+			if interrupted || sessionCtx.Err() != nil {
+				for _, skipped := range toolCalls[index+1:] {
+					results = append(results, map[string]interface{}{
+						"type":        "tool_result",
+						"tool_use_id": skipped.ID,
+						"content":     "skipped because the session was interrupted",
+						"is_error":    true,
+					})
+				}
+				break
+			}
 		}
 		a.Messages = append(a.Messages, Message{Role: "user", Content: results})
+		if sessionCtx.Err() != nil {
+			break
+		}
+		if interrupted {
+			a.ToolErrorCount = 0
+			a.emitPhase("Interrupted")
+			input, ok := a.waitForUserInput(inputFn)
+			if !ok {
+				break
+			}
+			a.Messages = append(a.Messages, Message{Role: "user", Content: input})
+			continue
+		}
 
 		// Self-repair: if tools failed, inject a nudge for the AI to fix it.
 		// Track consecutive failure rounds so we stop nudging after 3 attempts
@@ -289,12 +378,24 @@ func (a *Agent) Run(inputFn func() string) error {
 					Content: fmt.Sprintf("[System] One or more tool calls failed (attempt %d/3). Please analyze the error above and fix it. If a build/test failed, read the error message carefully and correct your code.", a.ToolErrorCount),
 				})
 			} else {
-				// Exhausted retries — pass the failure back to the user and
-				// stop the agent loop so it doesn't spin forever.
-				fmt.Println()
-				fmt.Printf("  " + ansiRed + "✗ tool retries exhausted — check the errors above" + ansiReset + "\n")
-				sessionErr = fmt.Errorf("tool retries exhausted after 3 failed repair attempts")
-				break
+				// Stop automatic self-repair, but keep the conversation alive so
+				// the user can retry or steer the agent instead of losing the TUI.
+				recoveryErr := fmt.Errorf("tool retries exhausted after 3 failed repair attempts")
+				a.emit(Event{Kind: EventError, Activity: "Tool repair stopped", Result: recoveryErr.Error(), IsError: true})
+				if !a.UIMode {
+					fmt.Println()
+					fmt.Printf("  "+ansiRed+"✗ %v"+ansiReset+"\n", recoveryErr)
+				}
+				input, retry, ok := a.waitForRecoveryInput(inputFn)
+				if !ok {
+					break
+				}
+				a.ToolErrorCount = 0
+				if retry {
+					continue
+				}
+				a.Messages = append(a.Messages, Message{Role: "user", Content: input})
+				continue
 			}
 		} else {
 			a.ToolErrorCount = 0
@@ -306,7 +407,7 @@ func (a *Agent) Run(inputFn func() string) error {
 
 	// Show session stats and end animation (skipped in TUI mode — the TUI
 	// draws its own exit UI).
-	if !tuiMode {
+	if !a.UIMode {
 		fmt.Println()
 		fmt.Println(a.Stats.Display())
 		AnimateSessionEnd()
@@ -315,12 +416,40 @@ func (a *Agent) Run(inputFn func() string) error {
 	// Auto-save the conversation so it can be resumed, Claude-Code style.
 	// Skip saving if the session was empty (just opened and exited).
 	if len(a.Messages) > 1 {
-		if id, err := SaveSession(a); err == nil && !tuiMode {
+		if id, err := SaveSession(a); err == nil && !a.UIMode {
 			fmt.Println()
 			fmt.Printf("  "+ansiDarkGray+"✓ session saved — resume with:"+ansiReset+" boltcode --resume %s\n", id)
 		}
 	}
 	return sessionErr
+}
+
+// waitForRecoveryInput is used after an API failure. /retry repeats the exact
+// same model request without mutating history; a normal message is appended as
+// new steering, while other slash commands remain available.
+func (a *Agent) waitForRecoveryInput(inputFn func() string) (input string, retry bool, ok bool) {
+	for {
+		if a.ShouldExit || a.context().Err() != nil {
+			return "", false, false
+		}
+		value := strings.TrimSpace(inputFn())
+		switch value {
+		case "":
+			continue
+		case "/retry", "retry":
+			return "", true, true
+		case "exit", "done", "quit", "/exit", "/quit":
+			return "", false, false
+		}
+		if strings.HasPrefix(value, "/") {
+			if a.handleSlashCommand(value) {
+				continue
+			}
+			fmt.Println("  " + ansiYellow + "unknown command: " + value + ansiReset)
+			continue
+		}
+		return value, false, true
+	}
 }
 
 // waitForUserInput filters empty lines and slash commands until it receives a
@@ -417,27 +546,39 @@ func (a *Agent) processResponse(resp []byte) []ToolCall {
 
 	var content []interface{}
 	var toolCalls []ToolCall
+	hasText := false
 
 	for _, block := range blocks {
 		blockType, _ := block["type"].(string)
 		switch blockType {
 		case "text":
 			content = append(content, block)
+			hasText = true
 		case "tool_use":
 			id, _ := block["id"].(string)
 			name, _ := block["name"].(string)
 			input, _ := json.Marshal(block["input"])
 			content = append(content, block)
 			toolCalls = append(toolCalls, ToolCall{ID: id, Name: name, Input: input})
+		case "thinking", "redacted_thinking":
+			// Preserve required Anthropic reasoning metadata in history without
+			// rendering private thinking text in the chat UI.
+			content = append(content, block)
 		}
 	}
 
 	a.Messages = append(a.Messages, Message{Role: "assistant", Content: content})
+	if hasText {
+		a.emitPhase("Writing response")
+	}
 	return toolCalls
 }
 
 // printToolUse displays what tool the agent is about to use (Claude Code style).
 func (a *Agent) printToolUse(tc ToolCall) {
+	if a.UIMode && a.EventFn != nil {
+		return
+	}
 	var input map[string]string
 	json.Unmarshal(tc.Input, &input)
 
@@ -473,6 +614,9 @@ func (a *Agent) printToolUse(tc ToolCall) {
 // searches it previews a few lines of output; the footer carries a status
 // glyph, a line/file count, and the elapsed time.
 func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Duration) {
+	if a.UIMode && a.EventFn != nil {
+		return
+	}
 	dur := toolDurationLabel(elapsed)
 
 	if result.IsError {
@@ -483,7 +627,7 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 		if dur != "" {
 			footer += " · " + dur
 		}
-		printToolFooter(false, footer)
+		a.printToolFooter(false, footer)
 		return
 	}
 
@@ -538,7 +682,7 @@ func (a *Agent) printToolResult(tc ToolCall, result ToolResult, elapsed time.Dur
 	default:
 		footer = dur
 	}
-	printToolFooter(true, footer)
+	a.printToolFooter(true, footer)
 }
 
 func (a *Agent) displayToolPath(path string) string {

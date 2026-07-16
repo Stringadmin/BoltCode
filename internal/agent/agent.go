@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 )
 
@@ -86,19 +87,109 @@ type Agent struct {
 	// NoSpinner disables the animated spinner. Used by the TUI which has its
 	// own status display.
 	NoSpinner bool
+	// UIMode tells the runtime that a structured/full-screen UI owns the
+	// surrounding chrome. It is session-local so two agents cannot leak display
+	// state into one another through package globals.
+	UIMode bool
+	// EventFn receives structured runtime events (tool start/result, phase
+	// changes). Terminal-only callers can leave it nil and keep the classic
+	// stdout rendering.
+	EventFn func(Event)
 
-	// cancelFn cancels the in-flight API request when invoked. Set by callAPI
-	// on each round; used by the Ctrl+C interrupt handler to stop a long
-	// response without killing the process.
-	cancelFn context.CancelFunc
+	runtimeMu     sync.Mutex
+	sessionCtx    context.Context
+	sessionCancel context.CancelFunc
+	cancelFn      context.CancelFunc
+	interrupted   bool
 }
 
-// CancelRequest interrupts an in-flight API call, if one is active.
-// Safe to call from any goroutine (used by the shell's Ctrl+C handler).
+// CancelRequest interrupts the currently active API request or long-running
+// tool, without ending the whole conversation.
 func (a *Agent) CancelRequest() {
-	if a.cancelFn != nil {
-		a.cancelFn()
+	a.runtimeMu.Lock()
+	cancel := a.cancelFn
+	a.interrupted = true
+	a.runtimeMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
+}
+
+// Cancel ends the whole agent session and interrupts any active operation.
+// It is safe to call more than once and from the Bubble Tea goroutine.
+func (a *Agent) Cancel() {
+	a.runtimeMu.Lock()
+	sessionCancel := a.sessionCancel
+	currentCancel := a.cancelFn
+	a.runtimeMu.Unlock()
+	if currentCancel != nil {
+		currentCancel()
+	}
+	if sessionCancel != nil {
+		sessionCancel()
+	}
+}
+
+// Done is closed when the current session is cancelled. A nil channel means
+// Run has not started yet and is intentionally ignored by select statements.
+func (a *Agent) Done() <-chan struct{} {
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	if a.sessionCtx == nil {
+		return nil
+	}
+	return a.sessionCtx.Done()
+}
+
+func (a *Agent) beginSession() context.Context {
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.sessionCtx = ctx
+	a.sessionCancel = cancel
+	a.cancelFn = nil
+	a.interrupted = false
+	return ctx
+}
+
+func (a *Agent) endSession() {
+	a.runtimeMu.Lock()
+	if a.sessionCancel != nil {
+		a.sessionCancel()
+	}
+	a.sessionCtx = nil
+	a.sessionCancel = nil
+	a.cancelFn = nil
+	a.runtimeMu.Unlock()
+}
+
+func (a *Agent) context() context.Context {
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	if a.sessionCtx != nil {
+		return a.sessionCtx
+	}
+	return context.Background()
+}
+
+func (a *Agent) setCurrentCancel(cancel context.CancelFunc) {
+	a.runtimeMu.Lock()
+	a.cancelFn = cancel
+	a.runtimeMu.Unlock()
+}
+
+func (a *Agent) clearCurrentCancel() {
+	a.runtimeMu.Lock()
+	a.cancelFn = nil
+	a.runtimeMu.Unlock()
+}
+
+func (a *Agent) consumeInterrupt() bool {
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	interrupted := a.interrupted
+	a.interrupted = false
+	return interrupted
 }
 
 // TodoItem is one step in the agent's session task plan.

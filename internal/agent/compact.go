@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -24,6 +26,9 @@ func (a *Agent) compactMessages(keepRecent int) error {
 
 	summary, err := a.summarizeHistory(older)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
 		// Fallback: hard truncation. Keep the first message (project context)
 		// + recent. Better than a broken session.
 		summary = fallbackSummary(older)

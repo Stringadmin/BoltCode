@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Stringadmin/BoltCode/internal/fio"
@@ -18,6 +19,25 @@ import (
 // exactly 8 lowercase hex chars. Validating before building a filesystem path
 // prevents path-traversal attacks via `boltcode --resume ../../etc/passwd`.
 var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}$`)
+
+var (
+	sessionClockMu sync.Mutex
+	lastSessionNow time.Time
+)
+
+// nextSessionTimestamp guarantees strictly increasing update timestamps
+// inside one process. Some Windows clocks can return the same value for two
+// immediate saves, which made newest-first ordering nondeterministic.
+func nextSessionTimestamp() time.Time {
+	sessionClockMu.Lock()
+	defer sessionClockMu.Unlock()
+	now := time.Now()
+	if !now.After(lastSessionNow) {
+		now = lastSessionNow.Add(time.Nanosecond)
+	}
+	lastSessionNow = now
+	return now
+}
 
 // validSessionID reports whether id is a well-formed session id. Anything not
 // matching is rejected before it is joined into a filesystem path.
@@ -34,6 +54,8 @@ type Session struct {
 	Workdir   string     `json:"workdir"`
 	RepoRoot  string     `json:"repo_root,omitempty"`
 	Intent    string     `json:"intent,omitempty"`
+	Provider  string     `json:"provider,omitempty"`
+	BaseURL   string     `json:"base_url,omitempty"`
 	Model     string     `json:"model"`
 	Messages  []Message  `json:"messages"`
 	TodoList  []TodoItem `json:"todo_list,omitempty"`
@@ -69,7 +91,7 @@ func SaveSession(a *Agent) (string, error) {
 		id = newSessionID()
 		a.SessionID = id
 	}
-	now := time.Now()
+	now := nextSessionTimestamp()
 	// If resuming, preserve the original CreatedAt.
 	created := now
 	if a.SessionCreatedAt != nil {
@@ -80,6 +102,8 @@ func SaveSession(a *Agent) (string, error) {
 		Workdir:   a.Workdir,
 		RepoRoot:  a.RepoRoot,
 		Intent:    a.Intent,
+		Provider:  a.Config.Provider,
+		BaseURL:   a.Config.BaseURL,
 		Model:     a.Config.Model,
 		Messages:  a.Messages,
 		TodoList:  a.TodoList,

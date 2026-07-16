@@ -46,6 +46,12 @@ func modelContextWindow(model string) int {
 	return 128_000 // conservative default
 }
 
+// ModelContextWindow exposes the configured context size to frontends without
+// duplicating provider/model heuristics in the UI package.
+func ModelContextWindow(model string) int {
+	return modelContextWindow(model)
+}
+
 // compactThreshold is the fraction of the context window at which auto-compact
 // kicks in. 0.8 = compact when usage reaches 80%.
 const compactThreshold = 0.8

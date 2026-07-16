@@ -8,26 +8,6 @@ import (
 	"time"
 )
 
-// noSpinnerMode suppresses spinner visual output. Set by the TUI which has
-// its own status display.
-var noSpinnerMode bool
-
-// SetNoSpinner enables or disables spinner visual output globally.
-func SetNoSpinner(on bool) {
-	noSpinnerMode = on
-}
-
-// tuiMode suppresses inline UI chrome (the persistent ❯ prompt lines, the
-// per-turn stats footer, and the end-of-session summary panel) that the
-// Bubble Tea TUI renders itself via its status bar. Agent text and tool
-// output still flow through stdout (captured by the TUI), with colors intact.
-var tuiMode bool
-
-// SetTUIMode enables or disables TUI-chrome suppression globally.
-func SetTUIMode(on bool) {
-	tuiMode = on
-}
-
 // Spinner shows an animated indicator while waiting for the API.
 // The animation stays visible after stopping (no clearing on Windows).
 type Spinner struct {
@@ -77,11 +57,6 @@ func (s *Spinner) Start() {
 				fmt.Fprint(os.Stdout, "\r\033[K")
 				return
 			default:
-				// NoSpinner mode: just sleep, no visual output.
-				if noSpinnerMode {
-					time.Sleep(80 * time.Millisecond)
-					continue
-				}
 				phrase := spinnerPhrases[phraseIdx%len(spinnerPhrases)]
 				if time.Since(lastSwap) > 1500*time.Millisecond {
 					phraseIdx++

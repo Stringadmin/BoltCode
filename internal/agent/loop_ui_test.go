@@ -20,10 +20,7 @@ func TestComposeInitialUserMessageUsesRealRequest(t *testing.T) {
 }
 
 func TestNewTUISessionWaitsForRealInputBeforeAPI(t *testing.T) {
-	SetTUIMode(true)
-	defer SetTUIMode(false)
-
-	a := &Agent{Workdir: t.TempDir(), Config: Config{Model: "test-model"}}
+	a := &Agent{Workdir: t.TempDir(), Config: Config{Model: "test-model"}, UIMode: true, NoSpinner: true}
 	calls := 0
 	if err := a.Run(func() string {
 		calls++
@@ -57,6 +54,19 @@ func TestWaitForUserInputSkipsEmptyAndStopsOnExit(t *testing.T) {
 
 	if got, ok := a.waitForUserInput(func() string { return "exit" }); ok || got != "" {
 		t.Fatalf("exit input = %q, %v", got, ok)
+	}
+}
+
+func TestWaitForRecoveryInputRetriesWithoutNewMessage(t *testing.T) {
+	a := &Agent{}
+	input, retry, ok := a.waitForRecoveryInput(func() string { return "/retry" })
+	if !ok || !retry || input != "" {
+		t.Fatalf("recovery = input %q retry=%v ok=%v", input, retry, ok)
+	}
+
+	input, retry, ok = a.waitForRecoveryInput(func() string { return "change direction" })
+	if !ok || retry || input != "change direction" {
+		t.Fatalf("recovery steering = input %q retry=%v ok=%v", input, retry, ok)
 	}
 }
 

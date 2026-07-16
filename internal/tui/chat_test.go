@@ -40,6 +40,17 @@ func TestChatStartsBusyAndHoldsDraft(t *testing.T) {
 	}
 }
 
+func TestInitialIntentIsVisibleInsideTUI(t *testing.T) {
+	m := NewChat(&agent.Agent{
+		Config: agent.Config{Model: "test-model"},
+		Intent: "清理 TUI 架构\n补齐交互状态",
+	})
+	view := ansi.Strip(strings.Join(m.lines, "\n"))
+	if !strings.Contains(view, "◆ you\n    清理 TUI 架构\n    补齐交互状态") {
+		t.Fatalf("initial intent hierarchy missing:\n%s", view)
+	}
+}
+
 func TestChatReadyAllowsExactlyOnePrompt(t *testing.T) {
 	m := newChatTestModel()
 	m.Update(agentReadyMsg{})
@@ -105,6 +116,99 @@ func TestActivityFromToolLine(t *testing.T) {
 	}
 }
 
+func TestStructuredToolEventShowsExactProgress(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 24
+	m.layout()
+	m.handleAgentEvent(agent.Event{
+		Kind:     agent.EventToolStarted,
+		Activity: "Reading file",
+		Detail:   "internal/agent/provider.go",
+	})
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "Reading file") || !strings.Contains(view, "internal/agent/provider.go") {
+		t.Fatalf("structured activity missing from view:\n%s", view)
+	}
+}
+
+func TestToolTimelineCollapsesAndExpandsDetails(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 30
+	m.layout()
+	m.handleAgentEvent(agent.Event{Kind: agent.EventToolStarted, ToolID: "call-1", ToolName: "read_file", Activity: "Reading file", Detail: "internal/tui/chat.go"})
+	m.handleAgentEvent(agent.Event{Kind: agent.EventToolFinished, ToolID: "call-1", ToolName: "read_file", Detail: "internal/tui/chat.go", Result: "line one\nline two", Duration: 20 * time.Millisecond})
+
+	collapsed := ansi.Strip(m.renderToolTimeline())
+	if !strings.Contains(collapsed, "Read") || strings.Contains(collapsed, "line one") {
+		t.Fatalf("collapsed timeline =\n%s", collapsed)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlO})
+	expanded := ansi.Strip(m.renderToolTimeline())
+	if !m.toolsExpanded || !strings.Contains(expanded, "line one") || !strings.Contains(expanded, "line two") {
+		t.Fatalf("expanded timeline =\n%s", expanded)
+	}
+}
+
+func TestRecoverableErrorOffersRetryWithoutEndingSession(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 30
+	m.layout()
+	m.handleAgentEvent(agent.Event{Kind: agent.EventError, Result: "API 429: rate limited", IsError: true})
+	if !m.recovering || m.finished || m.busy {
+		t.Fatalf("recovery state: recovering=%v finished=%v busy=%v", m.recovering, m.finished, m.busy)
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "Request failed") || !strings.Contains(view, "/retry") || !strings.Contains(view, "● recover") {
+		t.Fatalf("recovery UI missing:\n%s", view)
+	}
+	m.handleSlashCommand("/retry")
+	if got := <-m.agentIn; got != "/retry" {
+		t.Fatalf("retry input = %q", got)
+	}
+	if !m.busy || m.recovering {
+		t.Fatalf("retry did not resume busy state: busy=%v recovering=%v", m.busy, m.recovering)
+	}
+}
+
+func TestStatusShowsContextCostAndPlan(t *testing.T) {
+	a := &agent.Agent{
+		Config: agent.Config{Model: "deepseek-chat"},
+		TodoList: []agent.TodoItem{
+			{Content: "inspect", Status: "completed"},
+			{Content: "implement", Status: "in_progress"},
+		},
+		Stats: agent.NewStats(),
+	}
+	a.Stats.Add(a.Config.Model, 32000, 1000)
+	m := NewChat(a)
+	m.width = 220
+	m.height = 30
+	m.layout()
+	m.Update(statusTickMsg{})
+	status := ansi.Strip(m.renderStatusBar())
+	for _, want := range []string{"context 50%", "32k/1.0k in/out", "$", "plan 1/2", "implement"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status missing %q:\n%s", want, status)
+		}
+	}
+}
+
+func TestCtrlCInterruptsBusyActionBeforeQuitting(t *testing.T) {
+	a := &agent.Agent{Config: agent.Config{Model: "test-model"}}
+	m := NewChat(a)
+	model, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd != nil || model.(*ChatModel).quitting {
+		t.Fatal("first Ctrl+C while busy should request interruption, not quit")
+	}
+	if !strings.Contains(m.statusHint, "interrupt requested") || m.activity != "Stopping current action" {
+		t.Fatalf("interrupt state = hint %q activity %q", m.statusHint, m.activity)
+	}
+}
+
 func TestNormalizeAgentLineKeepsSpacingButDropsControlArtifacts(t *testing.T) {
 	if clean, drop := normalizeAgentLine(""); drop || clean != "" {
 		t.Fatalf("explicit blank line = %q, drop=%v", clean, drop)
@@ -126,6 +230,109 @@ func TestStatusBarStaysSingleWidth(t *testing.T) {
 	for _, line := range strings.Split(bar, "\n") {
 		if width := ansi.StringWidth(line); width > m.width {
 			t.Fatalf("status width = %d, want <= %d: %q", width, m.width, ansi.Strip(line))
+		}
+	}
+}
+
+func TestChineseIMECommitBackspaceAndSubmit(t *testing.T) {
+	m := newChatTestModel()
+	m.Update(agentReadyMsg{})
+
+	// Windows IMEs deliver the committed phrase as one KeyRunes message.
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("你好世界")})
+	if got := m.textarea.Value(); got != "你好世界" {
+		t.Fatalf("IME commit = %q", got)
+	}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	if got := m.textarea.Value(); got != "你好世" {
+		t.Fatalf("Chinese backspace = %q, want one rune removed", got)
+	}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := <-m.agentIn; got != "你好世" {
+		t.Fatalf("submitted Chinese text = %q", got)
+	}
+}
+
+func TestChineseBracketedPasteIsInsertedLiterally(t *testing.T) {
+	m := newChatTestModel()
+	m.Update(agentReadyMsg{})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("查询整个项目文件"), Paste: true})
+	if got := m.textarea.Value(); got != "查询整个项目文件" {
+		t.Fatalf("Chinese paste = %q", got)
+	}
+}
+
+func TestIMECommitEnterDoesNotAccidentallySubmit(t *testing.T) {
+	m := newChatTestModel()
+	m.Update(agentReadyMsg{})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("你好")})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.agentIn) != 0 || m.textarea.Value() != "你好" {
+		t.Fatalf("IME confirmation submitted unexpectedly: channel=%d value=%q", len(m.agentIn), m.textarea.Value())
+	}
+	if !strings.Contains(m.statusHint, "IME text committed") {
+		t.Fatalf("IME guard hint = %q", m.statusHint)
+	}
+
+	// A deliberate second Enter submits normally.
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := <-m.agentIn; got != "你好" {
+		t.Fatalf("second Enter submitted %q", got)
+	}
+}
+
+func TestInputReservesSecondRowForWindowsIME(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 30
+	m.layout()
+	if lines := strings.Count(m.textarea.View(), "\n") + 1; lines < chatInputRows {
+		t.Fatalf("textarea rows = %d, want at least %d", lines, chatInputRows)
+	}
+	wantViewportHeight := m.height - (chatInputRows + 2) - 2
+	if m.viewport.Height != wantViewportHeight {
+		t.Fatalf("viewport height = %d, want %d", m.viewport.Height, wantViewportHeight)
+	}
+}
+
+func TestInputDrawsPromptOnlyOnFirstRow(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 100
+	m.height = 30
+	m.layout()
+	view := ansi.Strip(m.textarea.View())
+	if count := strings.Count(view, "❯"); count != 1 {
+		t.Fatalf("prompt count = %d, want 1:\n%s", count, view)
+	}
+}
+
+func TestResumeHistoryUsesCurrentTUIAndHidesInternalContext(t *testing.T) {
+	a := &agent.Agent{
+		Config:  agent.Config{Model: "deepseek-v4-pro"},
+		Workdir: `F:\BoltCode`,
+		Messages: []agent.Message{
+			{Role: "user", Content: "## Current Project\nprivate scan data\n\n## User request\n检查项目架构"},
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": "我会检查整个项目。"},
+				map[string]interface{}{"type": "tool_use", "id": "call_1", "name": "list_files", "input": map[string]interface{}{}},
+			}},
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "call_1", "content": "secret tool output"},
+			}},
+		},
+	}
+	m := NewChat(a)
+	view := ansi.Strip(strings.Join(m.lines, "\n"))
+	for _, want := range []string{"resumed", "检查项目架构", "assistant", "我会检查整个项目。"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("resume history missing %q:\n%s", want, view)
+		}
+	}
+	for _, hidden := range []string{"private scan data", "secret tool output"} {
+		if strings.Contains(view, hidden) {
+			t.Fatalf("resume history leaked internal content %q:\n%s", hidden, view)
 		}
 	}
 }

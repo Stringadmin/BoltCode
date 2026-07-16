@@ -437,7 +437,13 @@ func (a *Agent) toolWebFetch(url string) (string, bool) {
 		return "url is required", true
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
+	ctx, cancel := context.WithTimeout(a.context(), 15*time.Second)
+	a.setCurrentCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearCurrentCancel()
+	}()
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Sprintf("invalid url: %v", err), true
 	}
@@ -587,8 +593,12 @@ func (a *Agent) toolGetDiagnostics(command string) (string, bool) {
 	if cmd == "" {
 		return "no diagnostic command configured — set one with update_memory (key: test_cmd)", false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(a.context(), 2*time.Minute)
+	a.setCurrentCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearCurrentCancel()
+	}()
 	prog := shellName()
 	args := shellArgs(cmd)
 	child := exec.CommandContext(ctx, prog, args...)
@@ -692,8 +702,12 @@ func (a *Agent) toolRunCommand(command string) (string, bool) {
 			return "user denied this command", true
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(a.context(), commandTimeout)
+	a.setCurrentCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearCurrentCancel()
+	}()
 	cmd := exec.CommandContext(ctx, shellName(), shellArgs(command)...)
 	cmd.Dir = a.Workdir
 	// Scrub credentials from the child environment so an AI-run command can't
@@ -707,6 +721,9 @@ func (a *Agent) toolRunCommand(command string) (string, bool) {
 	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Sprintf("%s\nexit: command timed out after %s", result, commandTimeout), true
+	}
+	if ctx.Err() == context.Canceled {
+		return "command interrupted", true
 	}
 	if err != nil {
 		return fmt.Sprintf("%s\nexit: %v", result, err), true

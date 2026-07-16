@@ -1,13 +1,12 @@
 package shell
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
 	"github.com/Stringadmin/BoltCode/internal/command"
+	"github.com/Stringadmin/BoltCode/internal/tui"
 )
 
 // Resume handles `boltcode --resume [id]`. With an id it loads that saved
@@ -33,50 +32,14 @@ func listAndPickSession(version string) error {
 		return fmt.Errorf("no saved sessions — start one with 'boltcode' then 'run'")
 	}
 
-	fmt.Println()
-	fmt.Println(titleStyle.Render("  Recent sessions"))
-	fmt.Println()
-	for i, s := range sessions {
-		if i >= 15 {
-			fmt.Printf("  ... and %d more\n", len(sessions)-15)
-			break
-		}
-		preview := s.Intent
-		if preview == "" {
-			preview = firstUserMessage(s.Messages)
-		}
-		if preview == "" {
-			preview = "(no summary)"
-		}
-		preview = truncateRunes(preview, 48)
-		fmt.Printf("  %s  %s  %s\n",
-			infoStyle.Render(s.ID),
-			ansiDarkGrayStyle(s.UpdatedAt.Format("2006-01-02 15:04")),
-			preview)
-	}
-	fmt.Println()
-	fmt.Print("  resume which? [id / Enter=latest / q=quit]: ")
-
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		// EOF (Ctrl-D) or read error: cancel rather than silently resuming
-		// the latest session.
-		fmt.Println()
-		return nil
-	}
-	line = strings.TrimSpace(line)
-	if line == "q" || line == "quit" {
-		return nil
-	}
-	if line == "" {
-		return startResumedAgent(version, &sessions[0])
-	}
-	s, err := agent.LoadSession(line)
+	selected, err := tui.PickSession(sessions)
 	if err != nil {
 		return err
 	}
-	return startResumedAgent(version, s)
+	if selected == nil {
+		return nil
+	}
+	return startResumedAgent(version, selected)
 }
 
 // startResumedAgent re-enters the agent loop with a saved session's messages.
@@ -84,7 +47,7 @@ func startResumedAgent(version string, s *agent.Session) error {
 	// Load the agent config (API key etc.) — try the session's model's profile
 	// context is gone, so just use the active profile.
 	app, _ := command.Load(s.Workdir)
-	cfg, err := loadAgentConfigForResume(app)
+	cfg, err := loadAgentConfigForResume(app, s)
 	if err != nil {
 		return err
 	}
@@ -101,81 +64,40 @@ func startResumedAgent(version string, s *agent.Session) error {
 	}
 
 	// If the saved model differs, honor it so resume uses what the session had.
+	if s.Provider != "" {
+		a.Config.Provider = s.Provider
+		a.Config.BaseURL = s.BaseURL
+	}
 	if s.Model != "" {
 		a.Config.Model = s.Model
 	}
 
-	// Simple stdin/stdout input (no full readline shell needed for resume).
-	inputFn := func() string {
-		var line string
-		fmt.Print("  ❯ ")
-		buf := make([]byte, 4096)
-		n, err := os.Stdin.Read(buf)
-		if err != nil {
-			return "exit"
-		}
-		line = strings.TrimRight(string(buf[:n]), "\r\n")
-		return line
-	}
-
-	a.ConfirmFn = func(cmd string) bool {
-		fmt.Printf("\n  \033[38;5;220m⚠ run:\033[0m %s\n", cmd)
-		fmt.Print("  [y/n] > ")
-		buf := make([]byte, 64)
-		n, err := os.Stdin.Read(buf)
-		if err != nil {
-			// EOF / read error: never approve a command on a failed read.
-			fmt.Println(infoStyle.Render("  command skipped"))
-			return false
-		}
-		ans := strings.ToLower(strings.TrimSpace(string(buf[:n])))
-		// Require an explicit yes; anything else (including empty/EOF) denies.
-		// Previously "" approved the command, so Ctrl-D ran it.
-		if ans == "y" || ans == "yes" {
-			return true
-		}
-		fmt.Println(infoStyle.Render("  command skipped"))
-		return false
-	}
-
-	return a.Run(inputFn)
+	return tui.RunChat(a)
 }
 
 // loadAgentConfigForResume gets an agent config; if not in a boltcode project
 // (app nil), still try the user-level config.
-func loadAgentConfigForResume(app *command.App) (*agent.Config, error) {
+func loadAgentConfigForResume(app *command.App, session *agent.Session) (*agent.Config, error) {
+	var cfg *agent.Config
+	var err error
 	if app != nil {
-		return app.LoadAgentConfig()
+		cfg, err = app.LoadAgentConfig()
+	} else {
+		cfg, err = command.LoadOwnAgentConfig()
 	}
-	// Fall back to loading the active profile directly.
-	own, err := command.LoadOwnAgentConfig()
-	if err == nil {
-		return own, nil
+	if err != nil {
+		return nil, fmt.Errorf("no API key configured — run 'boltcode' then 'config' first")
 	}
-	return nil, fmt.Errorf("no API key configured — run 'boltcode' then 'config' first")
-}
-
-// firstUserMessage returns the first user message text, if extractable.
-func firstUserMessage(msgs []agent.Message) string {
-	for _, m := range msgs {
-		if m.Role == "user" {
-			if s, ok := m.Content.(string); ok {
-				return s
+	if session == nil || session.Provider == "" || strings.EqualFold(cfg.Provider, session.Provider) {
+		return cfg, nil
+	}
+	if profiles, loadErr := agent.LoadProfiles(); loadErr == nil {
+		for _, profile := range profiles.Profiles {
+			if strings.EqualFold(profile.Provider, session.Provider) && profile.APIKey != "" {
+				matched := profile.ToConfig()
+				return &matched, nil
 			}
 		}
 	}
-	return ""
-}
-
-func truncateRunes(s string, max int) string {
-	r := []rune(s)
-	if len(r) > max {
-		return string(r[:max]) + "…"
-	}
-	return s
-}
-
-// ansiDarkGrayStyle wraps s in a dark-gray color.
-func ansiDarkGrayStyle(s string) string {
-	return "\033[38;5;241m" + s + "\033[0m"
+	return nil, fmt.Errorf("session %s uses provider %q, but no matching local profile is configured", session.ID, session.Provider)
 }

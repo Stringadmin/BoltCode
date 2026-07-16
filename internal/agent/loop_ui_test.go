@@ -70,6 +70,35 @@ func TestWaitForRecoveryInputRetriesWithoutNewMessage(t *testing.T) {
 	}
 }
 
+func TestWaitForUserInputClearsCompletedPlan(t *testing.T) {
+	var event Event
+	a := &Agent{
+		TodoList: []TodoItem{{Content: "finished", Status: "completed"}},
+		EventFn:  func(received Event) { event = received },
+	}
+	input, ok := a.waitForUserInput(func() string { return "next task" })
+	if !ok || input != "next task" {
+		t.Fatalf("waitForUserInput = %q, %v", input, ok)
+	}
+	if len(a.TodoList) != 0 {
+		t.Fatalf("completed plan survived: %+v", a.TodoList)
+	}
+	if event.Kind != EventPlanUpdated || event.PlanItems == nil || len(event.PlanItems) != 0 {
+		t.Fatalf("plan clear event = %+v", event)
+	}
+}
+
+func TestWaitForRecoveryRetryKeepsPlan(t *testing.T) {
+	a := &Agent{TodoList: []TodoItem{{Content: "retry task", Status: "completed"}}}
+	_, retry, ok := a.waitForRecoveryInput(func() string { return "/retry" })
+	if !ok || !retry {
+		t.Fatalf("retry response = retry %v, ok %v", retry, ok)
+	}
+	if len(a.TodoList) != 1 {
+		t.Fatal("/retry cleared the existing plan")
+	}
+}
+
 func TestDisplayToolPathMakesWorkspacePathRelative(t *testing.T) {
 	workdir := `C:\workspace\BoltCode`
 	if filepath.Separator == '/' {

@@ -88,6 +88,43 @@ func TestChatReadyAllowsExactlyOnePrompt(t *testing.T) {
 	}
 }
 
+func TestNewUserMessageClearsCompletedPlan(t *testing.T) {
+	m := newChatTestModel()
+	m.Update(agentReadyMsg{})
+	m.setPlanItems([]agent.TodoItem{
+		{Content: "inspect", Status: "completed"},
+		{Content: "implement", Status: "completed"},
+	})
+	m.textarea.SetValue("start the next task")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := <-m.agentIn; got != "start the next task" {
+		t.Fatalf("sent prompt = %q", got)
+	}
+	if m.planTotal != 0 || len(m.planItems) != 0 || m.renderPlanPanel() != "" {
+		t.Fatalf("completed plan survived new user turn: %+v", m.planItems)
+	}
+	if strings.Contains(ansi.Strip(m.renderStatusBar()), "tasks 2/2") {
+		t.Fatal("completed task count survived in status bar")
+	}
+}
+
+func TestNewUserMessageKeepsInProgressPlan(t *testing.T) {
+	m := newChatTestModel()
+	m.Update(agentReadyMsg{})
+	m.setPlanItems([]agent.TodoItem{
+		{Content: "inspect", Status: "completed"},
+		{Content: "implement", Status: "in_progress"},
+	})
+	m.textarea.SetValue("use the second approach")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	<-m.agentIn
+
+	if m.planTotal != 2 || len(m.planItems) != 2 {
+		t.Fatalf("active plan was cleared by clarification: %+v", m.planItems)
+	}
+}
+
 func TestBusyChatRendersAnimatedActivityLayer(t *testing.T) {
 	m := newChatTestModel()
 	m.width = 80

@@ -446,6 +446,7 @@ func (a *Agent) waitForRecoveryInput(inputFn func() string) (input string, retry
 			fmt.Println("  " + ansiYellow + "unknown command: " + value + ansiReset)
 			continue
 		}
+		a.clearCompletedPlanForNewTurn()
 		return value, false, true
 	}
 }
@@ -472,6 +473,7 @@ func (a *Agent) waitForUserInput(inputFn func() string) (string, bool) {
 		if input == "exit" || input == "done" || input == "quit" {
 			return "", false
 		}
+		a.clearCompletedPlanForNewTurn()
 		return input, true
 	}
 }

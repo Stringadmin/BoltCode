@@ -193,6 +193,7 @@ func (m *ChatModel) retryLastRequest() (tea.Model, tea.Cmd) {
 func (m *ChatModel) sendUserMessage(text string, leadingBlank bool) bool {
 	select {
 	case m.agentIn <- text:
+		m.clearCompletedPlanForNewTurn()
 		if leadingBlank {
 			m.lines = append(m.lines, "")
 		}

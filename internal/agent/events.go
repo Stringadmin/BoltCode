@@ -14,6 +14,7 @@ const (
 	EventPhase        EventKind = "phase"
 	EventToolStarted  EventKind = "tool_started"
 	EventToolFinished EventKind = "tool_finished"
+	EventPlanUpdated  EventKind = "plan_updated"
 	EventError        EventKind = "error"
 )
 
@@ -57,6 +58,25 @@ func (a *Agent) emit(event Event) {
 
 func (a *Agent) emitPhase(activity string) {
 	a.emit(Event{Kind: EventPhase, Activity: activity})
+}
+
+// clearCompletedPlanForNewTurn retires a finished plan when the user starts a
+// new conversational turn. In-progress plans remain visible because a user
+// response may be answering a clarification within the same task.
+func (a *Agent) clearCompletedPlanForNewTurn() bool {
+	if len(a.TodoList) == 0 {
+		return false
+	}
+	for _, item := range a.TodoList {
+		if item.Status != "completed" {
+			return false
+		}
+	}
+	a.TodoList = nil
+	// A non-nil empty slice distinguishes "clear the plan" from an event that
+	// simply has no plan payload.
+	a.emit(Event{Kind: EventPlanUpdated, PlanItems: []TodoItem{}})
+	return true
 }
 
 func (a *Agent) toolEvent(call ToolCall) Event {

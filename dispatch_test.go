@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestPopFlagSpaceForm(t *testing.T) {
 	val, rest := popFlag([]string{"--base", "main", "task", "new"}, "--base", "")
@@ -41,5 +45,38 @@ func TestPopFlagNotConsumedAsPositional(t *testing.T) {
 	}
 	if len(rest) != 2 || rest[1] != "--base" {
 		t.Errorf("rest = %v, want [task --base]", rest)
+	}
+}
+
+func TestDispatchRoutesCompletionErrors(t *testing.T) {
+	err := dispatch("completion", []string{"powershell"})
+	if err == nil || !strings.Contains(err.Error(), "unknown shell") {
+		t.Fatalf("completion dispatch error = %v", err)
+	}
+}
+
+func TestDispatchRejectsUnknownCommand(t *testing.T) {
+	err := dispatch("definitely-not-a-command", nil)
+	if err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("unknown command error = %v", err)
+	}
+}
+
+func TestDispatchProjectCommandsRequireInitializedWorkspace(t *testing.T) {
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(previous)
+
+	for _, command := range []string{"status", "sync", "task", "review"} {
+		t.Run(command, func(t *testing.T) {
+			if err := dispatch(command, nil); err == nil {
+				t.Fatalf("dispatch(%q) succeeded outside an initialized workspace", command)
+			}
+		})
 	}
 }

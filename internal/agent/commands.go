@@ -25,9 +25,11 @@ var SlashCommands = []SlashCommand{
 	{"/help", "show all commands"},
 	{"/tokens", "show token usage"},
 	{"/time", "show elapsed time"},
+	{"/mode", "show / switch build, plan, or ask mode"},
 	{"/model", "show / switch model"},
 	{"/profile", "list / switch provider profiles"},
 	{"/diff", "show uncommitted changes"},
+	{"/undo", "undo the last direct file-tool change"},
 	{"/files", "list worktree files"},
 	{"/clear", "clear conversation history"},
 	{"/compact", "summarize old messages (LLM)"},
@@ -56,11 +58,13 @@ func (a *Agent) handleSlashCommand(input string) bool {
 		fmt.Println("    /help        this message")
 		fmt.Println("    /tokens      show token usage")
 		fmt.Println("    /time        show elapsed time")
+		fmt.Println("    /mode <name> switch build / plan / ask mode")
 		fmt.Println("    /model       show current model")
 		fmt.Println("    /model <id>  switch model (saved to profile)")
 		fmt.Println("    /profile     interactive picker — switch by number or create new")
 		fmt.Println("    /profile <n> switch by name directly")
 		fmt.Println("    /diff        show uncommitted changes")
+		fmt.Println("    /undo        undo the last write/edit/delete/rename tool change")
 		fmt.Println("    /files       list files in worktree")
 		fmt.Println("    /clear       clear conversation history")
 		fmt.Println("    /compact     summarize old messages (LLM) to free context")
@@ -79,6 +83,22 @@ func (a *Agent) handleSlashCommand(input string) bool {
 
 	case input == "/time":
 		fmt.Printf("\n  "+ansiGray+"elapsed: %s"+ansiReset+"\n", formatDuration(a.Stats.Elapsed()))
+		return true
+
+	case input == "/mode":
+		mode := a.EffectiveMode()
+		fmt.Printf("\n  "+ansiGray+"mode: "+ansiWhite+"%s"+ansiReset+" — %s\n", mode, ModeDescription(mode))
+		fmt.Println("  " + ansiDarkGray + "switch with: /mode build | /mode plan | /mode ask" + ansiReset)
+		return true
+
+	case strings.HasPrefix(input, "/mode "):
+		mode, err := ParseMode(strings.TrimSpace(strings.TrimPrefix(input, "/mode ")))
+		if err != nil {
+			fmt.Println("\n  " + ansiRed + err.Error() + ansiReset)
+			return true
+		}
+		a.SetMode(mode)
+		fmt.Printf("\n  "+ansiGreen+"✓ mode: %s"+ansiReset+" — %s\n", mode, ModeDescription(mode))
 		return true
 
 	case input == "/model":
@@ -103,6 +123,15 @@ func (a *Agent) handleSlashCommand(input string) bool {
 
 	case input == "/diff":
 		a.showDiff()
+		return true
+
+	case input == "/undo":
+		description, err := a.undoLastCheckpoint()
+		if err != nil {
+			fmt.Println("\n  " + ansiYellow + err.Error() + ansiReset)
+			return true
+		}
+		fmt.Println("\n  " + ansiGreen + "✓ restored: " + description + ansiReset)
 		return true
 
 	case input == "/files":

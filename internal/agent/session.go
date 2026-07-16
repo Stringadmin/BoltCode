@@ -54,6 +54,7 @@ type Session struct {
 	Workdir       string     `json:"workdir"`
 	RepoRoot      string     `json:"repo_root,omitempty"`
 	Intent        string     `json:"intent,omitempty"`
+	Mode          Mode       `json:"mode,omitempty"`
 	Provider      string     `json:"provider,omitempty"`
 	BaseURL       string     `json:"base_url,omitempty"`
 	Model         string     `json:"model"`
@@ -103,6 +104,7 @@ func SaveSession(a *Agent) (string, error) {
 		Workdir:       a.Workdir,
 		RepoRoot:      a.RepoRoot,
 		Intent:        a.Intent,
+		Mode:          a.EffectiveMode(),
 		Provider:      a.Config.Provider,
 		BaseURL:       a.Config.BaseURL,
 		Model:         a.Config.Model,
@@ -123,6 +125,10 @@ func SaveSession(a *Agent) (string, error) {
 	if err := fio.WriteFileAtomic(path, data, 0o600); err != nil {
 		return "", err
 	}
+	// Keep session storage bounded without making a successful save fail just
+	// because an old history file could not be removed. The active session is
+	// always protected from cleanup.
+	_, _ = cleanupSessions(now, id, sessionCleanupPolicyFromEnv())
 	return id, nil
 }
 

@@ -31,7 +31,9 @@ func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
 		return nil, Usage{}, fmt.Errorf("invalid tool message sequence: %w", err)
 	}
 	url := providerURL(a.Config)
-	payload := buildPayload(a.Config, system, a.Messages)
+	mode := a.EffectiveMode()
+	system = system + "\n\n" + modeSystemInstructions(mode)
+	payload := buildPayloadForMode(a.Config, system, a.Messages, mode)
 
 	// Cancelable context so Ctrl+C can interrupt a long API call without
 	// killing the process. The cancel func is stored on the Agent so the

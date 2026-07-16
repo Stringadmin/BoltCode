@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Stringadmin/BoltCode/internal/fio"
 )
 
 // commandTimeout caps how long a single run_command tool call may run. A hung
@@ -143,6 +145,24 @@ func shellArgs(command string) []string {
 
 // ExecTool executes a tool call and returns the result string.
 func (a *Agent) ExecTool(call ToolCall) ToolResult {
+	mode := a.EffectiveMode()
+	if !ModeAllowsTool(mode, call.Name) {
+		return ToolResult{
+			ToolUseID: call.ID,
+			Content:   fmt.Sprintf("tool %q is not available in %s mode; switch to build mode to perform project changes", call.Name, mode),
+			IsError:   true,
+		}
+	}
+	checkpoint := a.captureToolCheckpoint(call)
+	result := a.execToolUnchecked(call)
+	result.Content = a.truncateToolOutput(result.Content)
+	if !result.IsError && checkpoint != nil {
+		a.pushCheckpoint(*checkpoint)
+	}
+	return result
+}
+
+func (a *Agent) execToolUnchecked(call ToolCall) ToolResult {
 	// Most tools take a flat string map; todo_write and multi_edit have nested
 	// input (arrays/objects), so handle those before the string-only unmarshal.
 	// They still need call.ID so the returned ToolResult carries the correct
@@ -312,6 +332,7 @@ func (a *Agent) toolSearchCode(pattern, path, glob string) (string, bool) {
 		return fmt.Sprintf("invalid search pattern: %v", err), true
 	}
 
+	maxMatches := a.toolResultItemLimit(48, 100, 1_000)
 	var matches []string
 	truncated := false
 	walkErr := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -341,7 +362,7 @@ func (a *Agent) toolSearchCode(pattern, path, glob string) (string, bool) {
 		for i, line := range strings.Split(string(data), "\n") {
 			if re.MatchString(line) {
 				matches = append(matches, fmt.Sprintf("%s:%d:%s", rel, i+1, line))
-				if len(matches) >= 500 {
+				if len(matches) >= maxMatches {
 					truncated = true
 					return filepath.SkipAll
 				}
@@ -356,10 +377,8 @@ func (a *Agent) toolSearchCode(pattern, path, glob string) (string, bool) {
 		return "no matches found", false
 	}
 	result := strings.Join(matches, "\n")
-	if len(result) > 8000 {
-		result = result[:8000] + "\n... (truncated)"
-	} else if truncated {
-		result += "\n... (truncated at 500 matches)"
+	if truncated {
+		result += fmt.Sprintf("\n... (truncated at %d matches for the active context window)", maxMatches)
 	}
 	return result, false
 }
@@ -425,11 +444,21 @@ func (a *Agent) toolRenameFile(from, to string) (string, bool) {
 }
 
 func (a *Agent) copyThenDelete(src, dst, from, to string) (string, bool) {
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Sprintf("error accessing %s for cross-device move: %v", from, err), true
+	}
+	if info.IsDir() {
+		return fmt.Sprintf("cross-device rename only supports files: %s", from), true
+	}
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return fmt.Sprintf("error reading %s for cross-device move: %v", from, err), true
 	}
-	if err := os.WriteFile(dst, data, 0o644); err != nil {
+	// Write atomically in the destination filesystem and preserve the source
+	// permission bits. Same-device os.Rename already preserves the inode and
+	// its mode; only this copy fallback needs to restore them explicitly.
+	if err := fio.WriteFileAtomic(dst, data, info.Mode().Perm()); err != nil {
 		return fmt.Sprintf("error writing %s during cross-device move: %v", to, err), true
 	}
 	if err := os.Remove(src); err != nil {
@@ -471,15 +500,9 @@ func (a *Agent) toolWebFetch(url string) (string, bool) {
 	if strings.HasPrefix(contentType, "text/html") {
 		// Strip basic HTML for readability. A simple approach: remove tags.
 		text := stripHTML(string(body))
-		if len(text) > 8000 {
-			text = text[:8000] + "\n... (truncated)"
-		}
 		return fmt.Sprintf("URL: %s\nContent-Type: %s\n\n%s", url, contentType, text), false
 	}
 	text := string(body)
-	if len(text) > 8000 {
-		text = text[:8000] + "\n... (truncated)"
-	}
 	return fmt.Sprintf("URL: %s\nContent-Type: %s\n\n%s", url, contentType, text), false
 }
 
@@ -539,9 +562,6 @@ func (a *Agent) toolGitDiff(path string) (string, bool) {
 	result := strings.TrimSpace(string(out))
 	if result == "" {
 		return "no changes", false
-	}
-	if len(result) > 8000 {
-		result = result[:8000] + "\n... (truncated)"
 	}
 	return result, false
 }
@@ -614,9 +634,6 @@ func (a *Agent) toolGetDiagnostics(command string) (string, bool) {
 	child.Env = scrubEnv(os.Environ(), a.Config.APIKey)
 	out, err := child.CombinedOutput()
 	result := strings.TrimSpace(string(out))
-	if len(result) > 10000 {
-		result = result[:10000] + "\n... (truncated)"
-	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return result + "\nexit: diagnostic timed out after 2m", true
 	}
@@ -724,9 +741,6 @@ func (a *Agent) toolRunCommand(command string) (string, bool) {
 	cmd.Env = scrubEnv(os.Environ(), a.Config.APIKey)
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))
-	if len(result) > 10000 {
-		result = result[:10000] + "\n... (truncated)"
-	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Sprintf("%s\nexit: command timed out after %s", result, commandTimeout), true
 	}
@@ -770,7 +784,7 @@ func (a *Agent) toolListFiles(path string) (string, bool) {
 		}
 		dir = full
 	}
-	const maxFiles = 500
+	maxFiles := a.toolResultItemLimit(32, 100, 2_000)
 	var files []string
 	truncated := false
 	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -815,7 +829,7 @@ func (a *Agent) toolGlob(pattern, path string) (string, bool) {
 	if err != nil {
 		return fmt.Sprintf("invalid pattern %q: %v", pattern, err), true
 	}
-	const maxFiles = 500
+	maxFiles := a.toolResultItemLimit(32, 100, 2_000)
 	var matches []string
 	truncated := false
 	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -862,24 +876,24 @@ func globToRegex(pattern string) (*regexp.Regexp, error) {
 	i := 0
 	for i < len(pattern) {
 		switch {
+		case i+2 < len(pattern) && pattern[i] == '*' && pattern[i+1] == '*' && pattern[i+2] == '/':
+			// A globstar followed by a slash means zero or more complete
+			// directories. Keeping the slash inside the optional group makes
+			// **/*.go match both root.go and nested/root.go, while preventing
+			// src/**/test from accidentally matching src/contest.
+			b.WriteString("(?:.*/)?")
+			i += 3
 		case i+1 < len(pattern) && pattern[i] == '*' && pattern[i+1] == '*':
 			b.WriteString(".*")
 			i += 2
-			// Skip optional trailing slash after **
-			if i < len(pattern) && pattern[i] == '/' {
-				i++
-			}
 		case pattern[i] == '*':
 			b.WriteString("[^/]*")
 			i++
 		case pattern[i] == '?':
 			b.WriteString("[^/]")
 			i++
-		case pattern[i] == '.':
-			b.WriteString("\\.")
-			i++
 		default:
-			b.WriteByte(pattern[i])
+			b.WriteString(regexp.QuoteMeta(string(pattern[i])))
 			i++
 		}
 	}

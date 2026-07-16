@@ -60,6 +60,7 @@ func startResumedAgent(version string, s *agent.Session) error {
 func newAgentFromSession(cfg *agent.Config, s *agent.Session) *agent.Agent {
 	a := &agent.Agent{
 		Config:           *cfg,
+		Mode:             s.Mode,
 		Workdir:          s.Workdir,
 		RepoRoot:         s.RepoRoot,
 		Intent:           s.Intent,

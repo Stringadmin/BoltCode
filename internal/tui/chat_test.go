@@ -253,6 +253,32 @@ func TestModelPopupIncludesCurrentCustomModel(t *testing.T) {
 	}
 }
 
+func TestModePopupAndShiftTabCycleRespectReadyState(t *testing.T) {
+	m := newChatTestModel()
+	m.showModePopup()
+	if m.popup == nil || m.popup.kind != "modes" || len(m.popup.items) != 3 {
+		t.Fatalf("mode popup = %+v", m.popup)
+	}
+	m.popup = nil
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.mode != agent.ModeBuild || !strings.Contains(m.statusHint, "when the agent is ready") {
+		t.Fatalf("busy mode change was not blocked: mode=%s hint=%q", m.mode, m.statusHint)
+	}
+	m.Update(agentReadyMsg{})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.mode != agent.ModePlan || m.agent.EffectiveMode() != agent.ModePlan {
+		t.Fatalf("first mode cycle = UI %s agent %s", m.mode, m.agent.EffectiveMode())
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.mode != agent.ModeAsk {
+		t.Fatalf("second mode cycle = %s, want ask", m.mode)
+	}
+	status := ansi.Strip(m.renderStatusBar())
+	if !strings.Contains(status, "ask · read-only") {
+		t.Fatalf("read-only mode missing from status:\n%s", status)
+	}
+}
+
 func TestCtrlPSessionPopupFiltersWorkspaceAndPreservesDraft(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("USERPROFILE", home)
@@ -571,6 +597,60 @@ func TestMouseWheelScrollsConversationViewport(t *testing.T) {
 	m.Update(tea.MouseMsg{Type: tea.MouseWheelDown, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
 	if m.viewport.YOffset != before {
 		t.Fatalf("wheel down did not restore offset: before=%d after=%d", before, m.viewport.YOffset)
+	}
+}
+
+func TestMouseSelectionCopiesWideCharactersWithRightClick(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 40
+	m.height = 20
+	m.layout()
+	m.viewport.SetContent("ab中文cd")
+	m.viewport.GotoTop()
+
+	copied := ""
+	m.copyText = func(text string) error {
+		copied = text
+		return nil
+	}
+	m.Update(tea.MouseMsg{X: 2, Y: 1, Type: tea.MouseLeft, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m.Update(tea.MouseMsg{X: 5, Y: 1, Type: tea.MouseMotion, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m.Update(tea.MouseMsg{X: 5, Y: 1, Type: tea.MouseRelease, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+
+	if got := m.selectedConversationText(); got != "中文" {
+		t.Fatalf("selected text = %q, want %q", got, "中文")
+	}
+
+	_, cmd := m.Update(tea.MouseMsg{X: 5, Y: 1, Type: tea.MouseRight, Button: tea.MouseButtonRight, Action: tea.MouseActionPress})
+	if cmd == nil {
+		t.Fatal("right-click did not schedule a clipboard write")
+	}
+	m.Update(cmd())
+	if copied != "中文" {
+		t.Fatalf("clipboard text = %q, want %q", copied, "中文")
+	}
+	if !strings.Contains(m.statusHint, "copied 2 characters") {
+		t.Fatalf("copy status = %q", m.statusHint)
+	}
+	if m.selectedConversationText() != "" {
+		t.Fatal("selection was not cleared after a successful copy")
+	}
+}
+
+func TestMouseSelectionCopiesAcrossConversationLines(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 40
+	m.height = 20
+	m.layout()
+	m.viewport.SetContent("alpha\nbeta")
+	m.viewport.GotoTop()
+
+	m.Update(tea.MouseMsg{X: 2, Y: 1, Type: tea.MouseLeft, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m.Update(tea.MouseMsg{X: 1, Y: 2, Type: tea.MouseMotion, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m.Update(tea.MouseMsg{X: 1, Y: 2, Type: tea.MouseRelease, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+
+	if got := m.selectedConversationText(); got != "pha\nbe" {
+		t.Fatalf("multiline selection = %q, want %q", got, "pha\nbe")
 	}
 }
 

@@ -130,6 +130,81 @@ func TestToolEditFileNotFound(t *testing.T) {
 	}
 }
 
+func TestCopyThenDeletePreservesFilePermissions(t *testing.T) {
+	a := newAgentInTemp(t)
+	source := filepath.Join(a.Workdir, "source.sh")
+	destination := filepath.Join(a.Workdir, "nested", "destination.sh")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("#!/bin/sh\necho ok\n"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	message, isErr := a.copyThenDelete(source, destination, "source.sh", "nested/destination.sh")
+	if isErr {
+		t.Fatalf("copyThenDelete failed: %s", message)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("source still exists after move: %v", err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil || string(data) != "#!/bin/sh\necho ok\n" {
+		t.Fatalf("destination content = %q, %v", data, err)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(destination)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o750 {
+			t.Fatalf("destination permissions = %o, want 750", got)
+		}
+	}
+}
+
+func TestGlobToRegexPreservesGlobstarDirectoryBoundaries(t *testing.T) {
+	tests := []struct {
+		pattern string
+		matches []string
+		rejects []string
+	}{
+		{
+			pattern: "src/**/test/*.go",
+			matches: []string{"src/test/a.go", "src/unit/test/a.go", "src/a/b/test/a.go"},
+			rejects: []string{"src/contest/a.go", "src/test/nested/a.go", "other/src/test/a.go"},
+		},
+		{
+			pattern: "**/*.go",
+			matches: []string{"main.go", "internal/agent/exec.go"},
+			rejects: []string{"main.ts"},
+		},
+		{
+			pattern: "files/file[1].go",
+			matches: []string{"files/file[1].go"},
+			rejects: []string{"files/file1.go"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.pattern, func(t *testing.T) {
+			re, err := globToRegex(test.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range test.matches {
+				if !re.MatchString(path) {
+					t.Errorf("%q should match %q (regex %q)", test.pattern, path, re.String())
+				}
+			}
+			for _, path := range test.rejects {
+				if re.MatchString(path) {
+					t.Errorf("%q should not match %q (regex %q)", test.pattern, path, re.String())
+				}
+			}
+		})
+	}
+}
+
 // --- symlink escape protection (P0) ---
 // A symlink inside the worktree pointing outside must not let a tool escape
 // the sandbox. Before the fix, safeJoin only did a string-based ".." check and

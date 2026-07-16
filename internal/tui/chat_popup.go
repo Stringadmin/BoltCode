@@ -94,6 +94,20 @@ func (m *ChatModel) showModelPopup() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *ChatModel) showModePopup() (tea.Model, tea.Cmd) {
+	items := make([]popupItem, 0, 3)
+	for _, mode := range []agent.Mode{agent.ModeBuild, agent.ModePlan, agent.ModeAsk} {
+		desc := agent.ModeDescription(mode)
+		if mode == m.mode {
+			desc += " · current"
+		}
+		items = append(items, popupItem{id: string(mode), label: strings.ToUpper(string(mode)), desc: desc})
+	}
+	m.popup = &popupState{kind: "modes", items: items, title: "Agent Mode"}
+	m.popup.applyFilter("")
+	return m, nil
+}
+
 func (m *ChatModel) showFilePopup() (tea.Model, tea.Cmd) {
 	files := m.scanFiles()
 	if len(files) == 0 {
@@ -251,6 +265,13 @@ func (m *ChatModel) applyPopupSelection(kind string, selection popupItem) (tea.M
 		m.refreshViewport()
 		m.viewport.GotoBottom()
 		return m, nil
+	case "modes":
+		mode, err := agent.ParseMode(selection.id)
+		if err != nil {
+			m.statusHint = err.Error()
+			return m, nil
+		}
+		return m.setChatMode(mode)
 	case "commands":
 		if selection.id == "/exit" {
 			m.quitting = true
@@ -285,5 +306,22 @@ func (m *ChatModel) applyPopupSelection(kind string, selection popupItem) (tea.M
 		}
 		return m, nil
 	}
+	return m, nil
+}
+
+func (m *ChatModel) setChatMode(mode agent.Mode) (tea.Model, tea.Cmd) {
+	m.agent.SetMode(mode)
+	m.mode = m.agent.EffectiveMode()
+	m.statusHint = "mode changed to " + string(m.mode)
+	if len(m.lines) > 0 && m.lines[len(m.lines)-1] != "" {
+		m.lines = append(m.lines, "")
+	}
+	m.lines = append(m.lines,
+		chatPromptStyle.Render("  ◇ mode: ")+strings.ToUpper(string(m.mode))+chatDimStyle.Render(" · "+agent.ModeDescription(m.mode)),
+	)
+	m.logDirty = true
+	m.refreshViewport()
+	m.viewport.GotoBottom()
+	m.textarea.Reset()
 	return m, nil
 }

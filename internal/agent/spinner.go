@@ -62,8 +62,9 @@ func (s *Spinner) Start() {
 					phraseIdx++
 					lastSwap = time.Now()
 				}
-				fmt.Fprintf(os.Stdout, "\r\033[K  \033[38;5;75m%s\033[0m \033[38;5;241m%s...\033[0m",
-					frames[i%len(frames)], phrase)
+				fmt.Fprintf(os.Stdout, "\r\033[K  %s%s%s %s%s...%s",
+					ansiCyan, frames[i%len(frames)], ansiReset,
+					ansiDarkGray, phrase, ansiReset)
 				i++
 				time.Sleep(80 * time.Millisecond)
 			}

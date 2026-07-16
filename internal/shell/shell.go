@@ -18,15 +18,16 @@ import (
 
 	"github.com/Stringadmin/BoltCode/internal/banner"
 	"github.com/Stringadmin/BoltCode/internal/command"
+	"github.com/Stringadmin/BoltCode/internal/theme"
 )
 
 var (
 	// promptStyle colors the main REPL prompt. NOTE: kept for compatibility but
 	// NOT used to render the readline prompt directly — see promptPrefix.
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("208"))
-	infoStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	errStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	okStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(theme.ColorOrange))
+	infoStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorMutedText))
+	errStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorDanger))
+	okStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorSuccess))
 )
 
 // promptPrefix is the colored "boltcode" portion of the REPL prompt. It MUST

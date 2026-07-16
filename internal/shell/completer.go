@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
+	"github.com/Stringadmin/BoltCode/internal/theme"
 
 	"github.com/chzyer/readline"
 )
@@ -61,9 +62,9 @@ func printSlashCommandPreview() {
 	for _, cmd := range agent.SlashCommands {
 		pad := maxLen - len(cmd.Name)
 		fmt.Printf("  %s%s%s  %s%s%s\n",
-			"\033[38;5;75m", cmd.Name, "\033[0m",
+			theme.ANSIPrimary, cmd.Name, "\033[0m",
 			strings.Repeat(" ", pad),
-			"\033[38;5;241m", cmd.Desc+"\033[0m")
+			theme.ANSIMutedText, cmd.Desc+"\033[0m")
 	}
 	fmt.Println()
 }
@@ -73,12 +74,12 @@ func printSlashCommandPreview() {
 // has an 8-entry color table and panics (index out of range) on 38;5;N codes
 // where N >= 8. This map covers every 256-color code used in render.go.
 var ansi256Replacements = []struct{ from, to string }{
-	{"\033[38;5;78m", "\033[32m"},  // green
-	{"\033[38;5;220m", "\033[33m"}, // yellow
-	{"\033[38;5;245m", "\033[37m"}, // gray / white
-	{"\033[38;5;241m", "\033[90m"}, // dark gray
-	{"\033[38;5;196m", "\033[31m"}, // red
-	{"\033[38;5;75m", "\033[36m"},  // cyan/blue
+	{theme.ANSISuccess, "\033[32m"},    // green
+	{theme.ANSIWarning, "\033[33m"},    // yellow
+	{theme.ANSISubtleText, "\033[37m"}, // gray / white
+	{theme.ANSIMutedText, "\033[90m"},  // dark gray
+	{theme.ANSIDanger, "\033[31m"},     // red
+	{theme.ANSIPrimary, "\033[36m"},    // cyan/blue
 }
 
 // sanitizeANSIForReadline replaces 256-color ANSI codes with basic ANSI

@@ -114,7 +114,9 @@ beyond git.
 /sessions    list saved conversations
 ```
 
-Conversations auto-save on exit — resume later with `boltcode --resume <id>`.
+Conversations auto-save on exit — resume later with `boltcode --resume <id>`. History is
+bounded to 500 sessions / 180 days by default; override with `BOLTCODE_SESSION_MAX` and
+`BOLTCODE_SESSION_RETENTION_DAYS` (set either to `0` to disable that cleanup boundary).
 
 ## Documentation
 

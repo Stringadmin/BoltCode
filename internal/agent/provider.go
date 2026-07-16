@@ -49,15 +49,24 @@ func buildOpenAIURL(baseURL string) string {
 
 // buildPayload creates the request body for the configured provider.
 func buildPayload(cfg Config, system string, messages []Message) []byte {
+	return buildPayloadForMode(cfg, system, messages, ModeBuild)
+}
+
+func buildPayloadForMode(cfg Config, system string, messages []Message, mode Mode) []byte {
+	tools := ToolsForMode(mode)
 	if isAnthropicProvider(cfg) {
-		return buildAnthropicPayload(cfg, system, messages)
+		return buildAnthropicPayloadWithTools(cfg, system, messages, tools)
 	}
-	return buildOpenAIPayload(cfg, system, messages)
+	return buildOpenAIPayloadWithTools(cfg, system, messages, tools)
 }
 
 // buildAnthropicPayload builds the Anthropic /v1/messages request body with
 // prompt caching and extended thinking.
 func buildAnthropicPayload(cfg Config, system string, messages []Message) []byte {
+	return buildAnthropicPayloadWithTools(cfg, system, messages, ToolsForMode(ModeBuild))
+}
+
+func buildAnthropicPayloadWithTools(cfg Config, system string, messages []Message, toolDefinitions []map[string]interface{}) []byte {
 	model := cfg.Model
 	if model == "" {
 		model = DefaultModel
@@ -72,8 +81,8 @@ func buildAnthropicPayload(cfg Config, system string, messages []Message) []byte
 	}
 	// Prompt caching belongs on the final real tool definition. Appending a
 	// standalone {cache_control: ...} object creates an invalid nameless tool.
-	tools := make([]map[string]interface{}, len(Tools))
-	for i, tool := range Tools {
+	tools := make([]map[string]interface{}, len(toolDefinitions))
+	for i, tool := range toolDefinitions {
 		clone := make(map[string]interface{}, len(tool)+1)
 		for key, value := range tool {
 			clone[key] = value
@@ -100,6 +109,10 @@ func buildAnthropicPayload(cfg Config, system string, messages []Message) []byte
 
 // buildOpenAIPayload builds the OpenAI /v1/chat/completions request body.
 func buildOpenAIPayload(cfg Config, system string, messages []Message) []byte {
+	return buildOpenAIPayloadWithTools(cfg, system, messages, ToolsForMode(ModeBuild))
+}
+
+func buildOpenAIPayloadWithTools(cfg Config, system string, messages []Message, toolDefinitions []map[string]interface{}) []byte {
 	model := cfg.Model
 	if model == "" {
 		model = DefaultModel
@@ -111,7 +124,7 @@ func buildOpenAIPayload(cfg Config, system string, messages []Message) []byte {
 		"stream_options": map[string]interface{}{
 			"include_usage": true,
 		},
-		"tools":      convertToolsToOpenAI(Tools),
+		"tools":      convertToolsToOpenAI(toolDefinitions),
 		"max_tokens": 8192,
 	}
 	payload, _ := json.Marshal(body)

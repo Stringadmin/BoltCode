@@ -9,12 +9,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
+	"github.com/Stringadmin/BoltCode/internal/theme"
 )
 
 var (
-	sessionPickerBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(1, 2)
-	sessionPickerActive = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("24")).Bold(true)
-	sessionPickerNormal = lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
+	sessionPickerBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(theme.ColorSelection)).Padding(1, 2)
+	sessionPickerActive = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorText)).Background(lipgloss.Color(theme.ColorPanel)).Bold(true)
+	sessionPickerNormal = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorSoftText))
 )
 
 type sessionPickerModel struct {

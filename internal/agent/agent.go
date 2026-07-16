@@ -50,6 +50,7 @@ func (p Profile) ToConfig() Config {
 // Agent is the built-in AI coding engine.
 type Agent struct {
 	Config    Config
+	Mode      Mode   // build (default) | plan | ask
 	Workdir   string // the task worktree (or repo root in solo mode)
 	RepoRoot  string // the main repository root — the /triage repo scope
 	Intent    string // what the user wants done
@@ -105,6 +106,7 @@ type Agent struct {
 	sessionCancel context.CancelFunc
 	cancelFn      context.CancelFunc
 	interrupted   bool
+	undoStack     []changeCheckpoint
 }
 
 // CancelRequest interrupts the currently active API request or long-running

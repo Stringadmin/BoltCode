@@ -142,6 +142,7 @@ boltcode --resume            # 不带 id：列出最近会话，交互选择
 - 恢复后会显示 `↻ resumed session <id> · N messages`，从上次中断处继续
 - 会话内可用 `/sessions` 查看所有历史会话
 - resume-of-resume 复用同一 ID，保持会话线程连续
+- 历史会话默认最多保留 500 条且保留 180 天；可用 `BOLTCODE_SESSION_MAX` 和 `BOLTCODE_SESSION_RETENTION_DAYS` 调整，设为 `0` 可分别关闭数量或时间清理
 
 ---
 

@@ -16,24 +16,6 @@ import (
 	"github.com/Stringadmin/BoltCode/internal/agent"
 )
 
-// ── Styles ──────────────────────────────────────────────────────────────────
-
-var (
-	chatUserStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	chatAssistantStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(lipgloss.Color("24"))
-	chatDimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	chatGreenStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))
-	chatErrorStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
-	chatPromptStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
-	chatTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
-	chatHeaderStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Background(lipgloss.Color("24")).Bold(true)
-	statusBarStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(lipgloss.Color("236"))
-	inputBoxStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63"))
-	popupStyle         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(0, 2)
-	popupSelStyle      = lipgloss.NewStyle().Background(lipgloss.Color("63")).Foreground(lipgloss.Color("255")).Bold(true)
-	popupNormalStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
-)
-
 // ── Message types (tea.Msg) ─────────────────────────────────────────────────
 
 type agentLineMsg struct{ text string }
@@ -89,6 +71,7 @@ type ChatModel struct {
 	// Status (read from agent.Stats)
 	busy          bool
 	model         string
+	mode          agent.Mode
 	tokens        int
 	inputTokens   int
 	outputTokens  int
@@ -119,6 +102,12 @@ type ChatModel struct {
 	planTotal     int
 	planCurrent   string
 
+	// Mouse selection is implemented inside the TUI because enabling mouse
+	// tracking for viewport scrolling prevents the terminal from performing
+	// its native drag selection and right-click copy behavior.
+	selection chatSelection
+	copyText  func(string) error
+
 	// Popup
 	popup *popupState
 
@@ -127,7 +116,7 @@ type ChatModel struct {
 }
 
 type popupState struct {
-	kind     string // "commands" | "models" | "files" | "sessions" | "confirm"
+	kind     string // "commands" | "models" | "modes" | "files" | "sessions" | "confirm"
 	items    []popupItem
 	filtered []int // indices into items after filtering
 	selected int   // index into filtered
@@ -178,7 +167,7 @@ func NewChat(a *agent.Agent) *ChatModel {
 		chatDimStyle.Render(fmt.Sprintf("  │  %s · %s", workspace, a.Config.Model)),
 		chatDimStyle.Render("  │"),
 		"  │  Describe what you want to build, fix, or understand.",
-		chatDimStyle.Render("  ╰─ / commands · @ files · Ctrl+P sessions · Ctrl+O tool results · Ctrl+D exit"),
+		chatDimStyle.Render("  ╰─ / commands · Shift+Tab mode · Ctrl+P sessions · Ctrl+O tools · drag select/right-click copy · Ctrl+D exit"),
 	}
 	if len(a.Messages) == 0 && strings.TrimSpace(a.Intent) != "" {
 		welcome = append(welcome, "", chatUserStyle.Render("  ◆ you"))
@@ -205,6 +194,7 @@ func NewChat(a *agent.Agent) *ChatModel {
 		lines:        welcome,
 		logDirty:     true,
 		model:        a.Config.Model,
+		mode:         a.EffectiveMode(),
 		busy:         true,
 		activity:     "Preparing project context",
 		busySince:    time.Now(),
@@ -230,18 +220,19 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		// The viewport owns wheel events. Bubble Tea only emits MouseMsg after
-		// the runtime enables mouse cell motion; don't pass wheel input to the
-		// textarea or it will look like the input box is swallowing scrolling.
-		if m.popup == nil && (msg.Type == tea.MouseWheelUp || msg.Type == tea.MouseWheelDown || msg.Type == tea.MouseWheelLeft || msg.Type == tea.MouseWheelRight) {
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			return m, cmd
-		}
-		return m, nil
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case clipboardResultMsg:
+		if msg.err != nil {
+			m.statusHint = "copy failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.clearSelection()
+		m.statusHint = fmt.Sprintf("copied %d characters", msg.characters)
+		return m, nil
 
 	case agentLineMsg:
 		wasAtBottom := !m.ready || m.viewport.AtBottom()
@@ -315,6 +306,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rounds = rounds
 		}
 		m.model = m.agent.Config.Model
+		m.mode = m.agent.EffectiveMode()
 		cmds = append(cmds, m.statusTick())
 
 	case confirmRequestMsg:
@@ -399,630 +391,10 @@ func (m *ChatModel) finishAgent(err error) {
 	m.viewport.GotoBottom()
 }
 
-// layout sizes the viewport and textarea to the current terminal dimensions.
-func (m *ChatModel) layout() {
-	if m.width == 0 || m.height == 0 {
-		return
-	}
-	inputH := chatInputRows + 2 // textarea rows + top/bottom border
-	headerH := 1
-	statusH := 2 // primary status + session metrics
-	vpH := m.height - inputH - statusH - headerH - chatConversationGapRows
-	if vpH < 3 {
-		vpH = 3
-	}
-	if !m.ready {
-		m.viewport = viewport.New(m.width, vpH)
-		m.viewport.MouseWheelEnabled = true
-		m.viewport.MouseWheelDelta = 4
-		m.ready = true
-	} else {
-		m.viewport.Width = m.width
-		m.viewport.Height = vpH
-	}
-	m.textarea.SetWidth(m.width - 2)
-	m.refreshViewport()
-}
-
-// refreshViewport re-renders the message log into the viewport, word-wrapping
-// to the current width.
-func (m *ChatModel) refreshViewport() {
-	if !m.ready {
-		return
-	}
-	wrapWidth := m.width - 3
-	if m.logDirty || m.renderWidth != wrapWidth {
-		m.renderedLog = wrapChatContent(strings.Join(m.lines, "\n"), wrapWidth)
-		m.renderWidth = wrapWidth
-		m.logDirty = false
-	}
-	content := m.renderedLog
-	if timeline := m.renderToolTimeline(); timeline != "" {
-		if content != "" {
-			content += "\n\n"
-		}
-		content += timeline
-	}
-	if plan := m.renderPlanPanel(); plan != "" {
-		if content != "" {
-			content += "\n\n"
-		}
-		content += plan
-	}
-	if m.busy && !m.finished {
-		if content != "" {
-			content += "\n\n"
-		}
-		content += m.renderActivityLine()
-	}
-	m.viewport.SetContent(content)
-}
-
-func (m *ChatModel) renderActivityLine() string {
-	activity := m.activity
-	if activity == "" {
-		activity = "Thinking"
-	}
-	elapsed := time.Since(m.busySince).Round(100 * time.Millisecond)
-	activityStyle := chatPromptStyle
-	if m.lastToolError {
-		activityStyle = chatErrorStyle
-	}
-	line := chatDimStyle.Render("  ╰─ ") + m.spinner.View() + " " + activityStyle.Render(activity)
-	if m.activityDetail != "" {
-		line += chatDimStyle.Render(" · " + m.activityDetail)
-	}
-	return line + chatDimStyle.Render(" · "+elapsed.String())
-}
-
-func wrapChatContent(content string, width int) string {
-	if width < 20 {
-		return content
-	}
-	var out []string
-	for _, line := range strings.Split(content, "\n") {
-		if ansi.StringWidth(line) <= width {
-			out = append(out, line)
-			continue
-		}
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		bodyWidth := width - indent
-		if bodyWidth < 1 {
-			bodyWidth = width
-		}
-		wrapped := strings.Split(ansi.WrapWc(strings.TrimLeft(line, " "), bodyWidth, "/\\"), "\n")
-		for _, part := range wrapped {
-			out = append(out, strings.Repeat(" ", indent)+strings.TrimLeft(part, " "))
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-func activityFromAgentLine(line string) string {
-	plain := strings.TrimSpace(ansi.Strip(line))
-	switch {
-	case strings.Contains(plain, "✦ assistant"):
-		return "Writing response"
-	case strings.Contains(plain, "📖") && strings.Contains(plain, "Read"):
-		return "Reading files"
-	case strings.Contains(plain, "📁") && strings.Contains(plain, "List"):
-		return "Exploring files"
-	case strings.Contains(plain, "🔍") && strings.Contains(plain, "Search"):
-		return "Searching code"
-	case strings.Contains(plain, "⚙") && strings.Contains(plain, "Run"):
-		return "Running command"
-	case strings.Contains(plain, "✏") && (strings.Contains(plain, "Edit") || strings.Contains(plain, "MultiEdit")):
-		return "Editing files"
-	case strings.Contains(plain, "📝") && strings.Contains(plain, "Write"):
-		return "Writing files"
-	case strings.HasPrefix(plain, "╰─"):
-		return "Analyzing tool results"
-	default:
-		return ""
-	}
-}
-
-func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.popup != nil {
-		return m.handlePopupKey(msg)
-	}
-
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		if m.textarea.Value() != "" {
-			m.textarea.Reset()
-			m.statusHint = "draft cleared"
-			return m, nil
-		}
-		if m.busy && !m.finished {
-			m.agent.CancelRequest()
-			m.statusHint = "interrupt requested"
-			m.activity = "Stopping current action"
-			m.activityDetail = ""
-			return m, nil
-		}
-		m.quitting = true
-		return m, tea.Quit
-
-	case tea.KeyCtrlD:
-		m.agent.Cancel()
-		m.quitting = true
-		return m, tea.Quit
-
-	case tea.KeyCtrlO:
-		if len(m.toolTimeline) == 0 {
-			m.statusHint = "no tool calls yet"
-			return m, nil
-		}
-		m.toolsExpanded = !m.toolsExpanded
-		if m.toolsExpanded {
-			m.statusHint = "tool details expanded"
-		} else {
-			m.statusHint = "tool details collapsed"
-		}
-		m.refreshViewport()
-		m.viewport.GotoBottom()
-		return m, nil
-
-	case tea.KeyCtrlP:
-		return m.showSessionPopup()
-
-	case tea.KeyEnter:
-		text := strings.TrimSpace(m.textarea.Value())
-		if text == "" {
-			return m, nil
-		}
-		// Some Windows terminals emit Enter immediately after an IME commits
-		// candidate text. Consume that Enter once so choosing “你好” does not
-		// accidentally submit the whole chat message.
-		if !m.imeCommitAt.IsZero() && time.Since(m.imeCommitAt) < 250*time.Millisecond {
-			m.imeCommitAt = time.Time{}
-			m.statusHint = "IME text committed — press Enter again to send"
-			return m, nil
-		}
-		if m.finished {
-			m.statusHint = "session ended"
-			return m, nil
-		}
-		if m.busy {
-			m.statusHint = "draft held — wait for the current reply"
-			return m, nil
-		}
-		if strings.HasPrefix(text, "/") {
-			return m.handleSlashCommand(text)
-		}
-		m.sendUserMessage(text, true)
-		return m, nil
-
-	case tea.KeyPgUp:
-		m.viewport.HalfViewUp()
-		return m, nil
-	case tea.KeyPgDown:
-		m.viewport.HalfViewDown()
-		return m, nil
-
-	default:
-		if msg.Type == tea.KeyRunes && !msg.Paste && containsNonASCII(msg.Runes) {
-			m.imeCommitAt = time.Now()
-		} else {
-			m.imeCommitAt = time.Time{}
-		}
-		// Let the textarea handle editing (arrows, backspace, runes, etc.)
-		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg)
-		val := m.textarea.Value()
-		// Instant popup triggers.
-		if val == "/" {
-			return m.showCommandPopup()
-		}
-		// "@" opens the file picker when it's the last typed char.
-		if strings.HasSuffix(val, "@") {
-			return m.showFilePopup()
-		}
-		return m, cmd
-	}
-}
-
-func containsNonASCII(runes []rune) bool {
-	for _, r := range runes {
-		if r > 127 {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *ChatModel) handleSlashCommand(text string) (tea.Model, tea.Cmd) {
-	switch text {
-	case "/":
-		return m.showCommandPopup()
-	case "/model":
-		m.textarea.Reset()
-		return m.showModelPopup()
-	case "/sessions":
-		return m.showSessionPopup()
-	case "/exit", "/quit", "/q":
-		m.quitting = true
-		return m, tea.Quit
-	case "/clear":
-		m.lines = nil
-		m.logDirty = true
-		m.refreshViewport()
-		m.textarea.Reset()
-		return m, nil
-	case "/retry":
-		if !m.recovering {
-			m.statusHint = "nothing to retry"
-			m.textarea.Reset()
-			return m, nil
-		}
-		return m.retryLastRequest()
-	default:
-		m.sendUserMessage(text, false)
-		return m, nil
-	}
-}
-
-func (m *ChatModel) retryLastRequest() (tea.Model, tea.Cmd) {
-	select {
-	case m.agentIn <- "/retry":
-		m.recovering = false
-		m.busy = true
-		m.statusHint = "retrying last request"
-		m.activity = "Retrying request"
-		m.activityDetail = ""
-		m.busySince = time.Now()
-		m.textarea.Placeholder = chatBusyPlaceholder
-		m.lines = append(m.lines, "", chatPromptStyle.Render("  ↻ retrying last request"))
-		m.logDirty = true
-		m.refreshViewport()
-		m.viewport.GotoBottom()
-		m.textarea.Reset()
-		return m, nil
-	default:
-		m.statusHint = "retry channel is not ready"
-		return m, nil
-	}
-}
-
-// sendUserMessage atomically mirrors one accepted prompt in the viewport and
-// in the one-slot agent channel. It is called only after the ready handshake,
-// so a second Enter cannot create a visible-but-not-yet-consumed message.
-func (m *ChatModel) sendUserMessage(text string, leadingBlank bool) bool {
-	select {
-	case m.agentIn <- text:
-		if leadingBlank {
-			m.lines = append(m.lines, "")
-		}
-		m.busy = true
-		m.recovering = false
-		m.lastError = ""
-		m.statusHint = ""
-		m.activity = "Thinking"
-		m.activityDetail = ""
-		m.lastToolError = false
-		m.busySince = time.Now()
-		m.textarea.Placeholder = chatBusyPlaceholder
-		m.lines = append(m.lines, chatUserStyle.Render("  ◆ you"))
-		for _, line := range strings.Split(text, "\n") {
-			m.lines = append(m.lines, "    "+line)
-		}
-		m.logDirty = true
-		m.refreshViewport()
-		m.viewport.GotoBottom()
-		m.textarea.Reset()
-		return true
-	default:
-		m.busy = true
-		m.statusHint = "draft held — input channel is not ready"
-		return false
-	}
-}
-
-// ── View ────────────────────────────────────────────────────────────────────
-
-func (m *ChatModel) View() string {
-	if m.quitting {
-		return ""
-	}
-	if !m.ready {
-		return "Starting BoltCode..."
-	}
-
-	base := lipgloss.JoinVertical(lipgloss.Left,
-		m.renderSessionHeader(),
-		m.viewport.View(),
-		strings.Repeat(" ", max(0, m.width)),
-		m.renderStatusBar(),
-		m.renderInputBox(),
-	)
-	if m.popup != nil {
-		return m.renderPopupOverlay(base)
-	}
-	return base
-}
-
-func (m *ChatModel) renderSessionHeader() string {
-	state := "ready"
-	if m.failed {
-		state = "failed"
-	} else if m.finished {
-		state = "stopped"
-	} else if m.recovering {
-		state = "recovery"
-	} else if m.busy {
-		state = "working"
-	}
-	workspace := filepath.Base(filepath.Clean(m.agent.Workdir))
-	if workspace == "" || workspace == "." {
-		workspace = "workspace"
-	}
-	scroll := 100
-	if m.ready && !m.viewport.AtBottom() {
-		scroll = int(m.viewport.ScrollPercent() * 100)
-	}
-	content := fmt.Sprintf(" ⚡ BoltCode  ·  %s  ·  %s  ·  %s  ·  ↕ %d%% ", workspace, m.model, state, scroll)
-	if ansi.StringWidth(content) > m.width {
-		content = ansi.Truncate(content, m.width, "…")
-	}
-	return chatHeaderStyle.Width(m.width).Render(content)
-}
-
-func (m *ChatModel) renderInputBox() string {
-	style := inputBoxStyle
-	switch {
-	case m.failed || m.recovering:
-		style = style.BorderForeground(lipgloss.Color("196"))
-	case m.busy:
-		style = style.BorderForeground(lipgloss.Color("75"))
-	default:
-		style = style.BorderForeground(lipgloss.Color("78"))
-	}
-	return style.Render(m.textarea.View())
-}
-
-func (m *ChatModel) renderStatusBar() string {
-	left := ""
-	if m.failed {
-		left = chatErrorStyle.Render("● failed")
-	} else if m.finished {
-		left = chatDimStyle.Render("● stopped")
-	} else if m.recovering {
-		left = chatErrorStyle.Render("● recover")
-	} else if m.busy {
-		activity := m.activity
-		if activity == "" {
-			activity = "Thinking"
-		}
-		left = m.spinner.View() + " " + chatPromptStyle.Render(activity)
-		if m.activityDetail != "" {
-			left += chatDimStyle.Render(" · " + m.activityDetail)
-		}
-	} else {
-		left = chatGreenStyle.Render("● ready")
-	}
-	if m.statusHint != "" {
-		left += chatDimStyle.Render(" · " + m.statusHint)
-	}
-	permission := "confirm"
-	if m.agent.AutoAllow {
-		permission = "auto-allow"
-	}
-	scroll := 100
-	if m.ready && !m.viewport.AtBottom() {
-		scroll = int(m.viewport.ScrollPercent() * 100)
-	}
-	right := chatDimStyle.Render(fmt.Sprintf("%s · %s · ↕ %d%% · Ctrl+P sessions", m.model, permission, scroll))
-	primary := fitStatusLine(left+"  │  "+right, m.width)
-
-	window := m.agent.ContextWindow()
-	contextPct := 0
-	if window > 0 {
-		contextPct = int(float64(m.contextTokens) / float64(window) * 100)
-	}
-	statusParts := []string{fmt.Sprintf("context %d%% · %s/%s", contextPct, formatMetricTokens(m.contextTokens), formatMetricTokens(window))}
-	if m.planTotal > 0 {
-		plan := fmt.Sprintf("tasks %d/%d", m.planDone, m.planTotal)
-		if m.planCurrent != "" {
-			plan += " · " + m.planCurrent
-		}
-		statusParts = append(statusParts, plan)
-	}
-	statusParts = append(statusParts,
-		fmt.Sprintf("%d tools · %d rounds", m.tools, m.rounds),
-		fmt.Sprintf("%s/%s in/out", formatMetricTokens(m.inputTokens), formatMetricTokens(m.outputTokens)),
-	)
-	toolAction := "expand"
-	if m.toolsExpanded {
-		toolAction = "collapse"
-	}
-	secondary := strings.Join(statusParts, "  │  ") + fmt.Sprintf("  │  Ctrl+O %s tool results · wheel/PgUp scroll", toolAction)
-	secondary = fitStatusLine(chatDimStyle.Render(secondary), m.width)
-	return lipgloss.JoinVertical(lipgloss.Left,
-		statusBarStyle.Width(m.width).Render(primary),
-		chatDimStyle.Background(lipgloss.Color("234")).Width(m.width).Render(secondary),
-	)
-}
-
-func formatMetricTokens(tokens int) string {
-	if tokens >= 1_000_000 {
-		return fmt.Sprintf("%.1fm", float64(tokens)/1_000_000)
-	}
-	if tokens >= 10_000 {
-		return fmt.Sprintf("%dk", tokens/1000)
-	}
-	if tokens >= 1_000 {
-		return fmt.Sprintf("%.1fk", float64(tokens)/1000)
-	}
-	return fmt.Sprintf("%d", tokens)
-}
-
-func fitStatusLine(content string, width int) string {
-	if width > 0 && ansi.StringWidth(content) > width {
-		content = ansi.Truncate(content, width, "…")
-	}
-	if pad := width - lipgloss.Width(content); pad > 0 {
-		content += strings.Repeat(" ", pad)
-	}
-	return content
-}
-
 func normalizeAgentLine(line string) (clean string, drop bool) {
 	clean = stripCR(line)
 	drop = strings.TrimSpace(ansi.Strip(clean)) == "" && (strings.Contains(line, "\r") || strings.Contains(line, "\033[K"))
 	return clean, drop
-}
-
-func (m *ChatModel) renderPopupOverlay(base string) string {
-	popup := m.renderPopupPanel()
-	return overlayCentered(base, popup, m.width, m.height)
-}
-
-func (m *ChatModel) renderPopupPanel() string {
-	p := m.popup
-	popupWidth := m.width - 12
-	if popupWidth > 100 {
-		popupWidth = 100
-	}
-	if popupWidth < 32 {
-		popupWidth = max(20, m.width-4)
-	}
-	// Style.Width includes horizontal padding in its wrapping calculation.
-	// Rows must use the actual inner width or a full selected row wraps by the
-	// four padding cells, which was especially visible with CJK session titles.
-	itemWidth := max(12, popupWidth-popupStyle.GetHorizontalPadding())
-	var items []string
-	items = append(items, chatTitleStyle.Render(p.title)+chatDimStyle.Render("  esc"))
-	if p.subtitle != "" {
-		items = append(items, chatDimStyle.Render(p.subtitle))
-	}
-
-	// Confirm popup: show the command being confirmed.
-	if p.kind == "confirm" {
-		items = append(items, "")
-		items = append(items, chatPromptStyle.Render("  "+p.prompt))
-		items = append(items, "")
-		for i, it := range p.items {
-			items = append(items, renderPopupItem(it, i == p.selected, itemWidth))
-		}
-		items = append(items, "")
-		items = append(items, chatDimStyle.Render("↑↓ navigate · Enter select"))
-		return popupStyle.Width(popupWidth).Render(strings.Join(items, "\n"))
-	}
-
-	// Filterable popup: keep the search affordance visible even before the
-	// user types, matching command-palette and session-switcher conventions.
-	search := chatDimStyle.Render("Search")
-	if p.filter != "" {
-		search = popupNormalStyle.Render(p.filter)
-	}
-	items = append(items, chatPromptStyle.Render("› ")+search)
-	items = append(items, "")
-
-	if len(p.filtered) == 0 {
-		items = append(items, chatDimStyle.Render("  (no matches)"))
-	}
-	// Cap visible rows so long lists don't overflow the screen.
-	maxRows := min(12, max(3, m.height-10))
-	start := 0
-	if p.selected >= maxRows {
-		start = p.selected - maxRows + 1
-	}
-	end := start + maxRows
-	if end > len(p.filtered) {
-		end = len(p.filtered)
-	}
-	for vi := start; vi < end; vi++ {
-		it := p.items[p.filtered[vi]]
-		items = append(items, renderPopupItem(it, vi == p.selected, itemWidth))
-	}
-	if len(p.filtered) > maxRows {
-		items = append(items, chatDimStyle.Render(fmt.Sprintf("  … %d/%d", p.selected+1, len(p.filtered))))
-	}
-	items = append(items, "")
-	footer := "type to search · ↑↓ navigate · Enter select · Esc cancel"
-	if p.kind == "sessions" {
-		footer = "type to search · ↑↓ navigate · Enter switch · Esc cancel"
-	}
-	items = append(items, chatDimStyle.Render(footer))
-	return popupStyle.Width(popupWidth).Render(strings.Join(items, "\n"))
-}
-
-func renderPopupItem(item popupItem, selected bool, width int) string {
-	marker := "  "
-	if selected {
-		marker = "▶ "
-	}
-	labelWidth := max(8, width/2)
-	label := ansi.Truncate(item.label, labelWidth, "…")
-	line := marker + label
-	if item.desc != "" {
-		remaining := width - ansi.StringWidth(line) - 2
-		if remaining > 4 {
-			line += "  " + ansi.Truncate(item.desc, remaining, "…")
-		}
-	}
-	line = ansi.Truncate(line, width, "…")
-	if selected {
-		return popupSelStyle.Width(width).Render(line)
-	}
-	return popupNormalStyle.Render(line)
-}
-
-// overlayCentered composites a modal over the existing chat instead of using
-// lipgloss.Place, whose blank padding replaces the entire alternate screen.
-// ANSI-aware cuts preserve colors and wide CJK characters on both sides of
-// the popup, giving the terminal equivalent of a floating window.
-func overlayCentered(base, popup string, width, height int) string {
-	if width <= 0 || height <= 0 {
-		return popup
-	}
-	popupLines := strings.Split(popup, "\n")
-	popupWidth := min(width, ansiBlockWidth(popupLines))
-	popupHeight := min(height, len(popupLines))
-	startX := max(0, (width-popupWidth)/2)
-	startY := max(0, (height-popupHeight)/2)
-
-	baseLines := strings.Split(base, "\n")
-	output := make([]string, height)
-	for row := 0; row < height; row++ {
-		baseLine := ""
-		if row < len(baseLines) {
-			baseLine = baseLines[row]
-		}
-		baseLine = fitOverlayLine(baseLine, width)
-		popupRow := row - startY
-		if popupRow < 0 || popupRow >= popupHeight || popupRow >= len(popupLines) {
-			output[row] = baseLine
-			continue
-		}
-
-		overlayLine := fitOverlayLine(popupLines[popupRow], popupWidth)
-		// ANSI cuts cannot return half of a double-width rune. If the boundary
-		// lands inside CJK text or an emoji, pad the segment back to its exact
-		// target width so this popup row cannot shift left or right.
-		left := fitOverlayLine(ansi.Cut(baseLine, 0, startX), startX)
-		rightWidth := max(0, width-startX-popupWidth)
-		right := fitOverlayLine(ansi.Cut(baseLine, startX+popupWidth, width), rightWidth)
-		output[row] = fitOverlayLine(left+overlayLine+right, width)
-	}
-	return strings.Join(output, "\n")
-}
-
-func ansiBlockWidth(lines []string) int {
-	width := 0
-	for _, line := range lines {
-		width = max(width, ansi.StringWidth(line))
-	}
-	return width
-}
-
-func fitOverlayLine(line string, width int) string {
-	line = ansi.Truncate(line, width, "")
-	if padding := width - ansi.StringWidth(line); padding > 0 {
-		line += strings.Repeat(" ", padding)
-	}
-	return line
 }
 
 // stripCR removes carriage returns and the ANSI clear-line sequence so spinner

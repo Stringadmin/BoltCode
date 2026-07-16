@@ -8,12 +8,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
+	"github.com/Stringadmin/BoltCode/internal/theme"
 )
 
 var (
-	planCompletedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Strikethrough(true)
-	planCurrentStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	planPendingStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	planCompletedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorMutedText)).Strikethrough(true)
+	planCurrentStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorWarning)).Bold(true)
+	planPendingStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorSubtleText))
 )
 
 func (m *ChatModel) setPlanItems(items []agent.TodoItem) {

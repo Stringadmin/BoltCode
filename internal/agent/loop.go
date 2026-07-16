@@ -314,47 +314,40 @@ func (a *Agent) Run(inputFn func() string) error {
 		var results []map[string]interface{}
 		hasError := false
 		interrupted := false
-		for index, tc := range toolCalls {
-			a.Stats.AddToolCall()
-			started := a.toolEvent(tc)
-			a.emit(started)
-			a.printToolUse(tc)
-			start := time.Now()
-			result := a.ExecTool(tc)
-			elapsed := time.Since(start)
-			a.printToolResult(tc, result, elapsed)
-			finishedEvent := Event{
-				Kind:     EventToolFinished,
-				Activity: "Reviewing tool result",
-				ToolID:   tc.ID,
-				ToolName: tc.Name,
-				Detail:   started.Detail,
-				Result:   result.Content,
-				IsError:  result.IsError,
-				Duration: elapsed,
+		if canParallelizeToolCalls(toolCalls) {
+			for _, execution := range a.executeReadToolsParallel(toolCalls) {
+				result, isError := a.finishToolExecution(execution)
+				results = append(results, result)
+				hasError = hasError || isError
 			}
-			a.addPlanState(&finishedEvent)
-			a.emit(finishedEvent)
-			if result.IsError {
-				hasError = true
-			}
-			results = append(results, map[string]interface{}{
-				"type":        "tool_result",
-				"tool_use_id": result.ToolUseID,
-				"content":     result.Content,
-				"is_error":    result.IsError,
-			})
 			interrupted = a.consumeInterrupt()
-			if interrupted || sessionCtx.Err() != nil {
-				for _, skipped := range toolCalls[index+1:] {
-					results = append(results, map[string]interface{}{
-						"type":        "tool_result",
-						"tool_use_id": skipped.ID,
-						"content":     "skipped because the session was interrupted",
-						"is_error":    true,
-					})
+			if sessionCtx.Err() != nil {
+				interrupted = true
+			}
+		} else {
+			for index, tc := range toolCalls {
+				a.Stats.AddToolCall()
+				started := a.toolEvent(tc)
+				a.emit(started)
+				a.printToolUse(tc)
+				start := time.Now()
+				result := a.ExecTool(tc)
+				elapsed := time.Since(start)
+				toolResult, isError := a.finishToolExecution(toolExecution{call: tc, started: started, result: result, elapsed: elapsed})
+				results = append(results, toolResult)
+				hasError = hasError || isError
+				interrupted = a.consumeInterrupt()
+				if interrupted || sessionCtx.Err() != nil {
+					for _, skipped := range toolCalls[index+1:] {
+						results = append(results, map[string]interface{}{
+							"type":        "tool_result",
+							"tool_use_id": skipped.ID,
+							"content":     "skipped because the session was interrupted",
+							"is_error":    true,
+						})
+					}
+					break
 				}
-				break
 			}
 		}
 		a.Messages = append(a.Messages, Message{Role: "user", Content: results})
@@ -544,7 +537,7 @@ func (a *Agent) autoCompact(used int) {
 	a.Stats.SetContextTokens(compactedTokens)
 	fmt.Printf("  "+ansiGreen+"✓ compacted — context now ~%s tokens"+ansiReset+"\n",
 		formatTokens(compactedTokens))
-	fmt.Print("  \033[38;5;75m❯\033[0m\n")
+	fmt.Print("  " + ansiCyan + "❯" + ansiReset + "\n")
 }
 
 // processResponse parses the API response content blocks and extracts tool calls.

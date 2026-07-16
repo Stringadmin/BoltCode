@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Stringadmin/BoltCode/internal/theme"
 )
 
 // ANSI color constants for terminal rendering. A curated palette rather than
@@ -15,18 +17,18 @@ const (
 	ansiDim       = "\033[2m"
 	ansiItalic    = "\033[3m"
 	ansiUnderline = "\033[4m"
-	ansiCyan      = "\033[38;5;75m"
-	ansiGreen     = "\033[38;5;78m"
-	ansiYellow    = "\033[38;5;220m"
-	ansiGray      = "\033[38;5;245m"
-	ansiDarkGray  = "\033[38;5;241m"
-	ansiWhite     = "\033[97m"
-	ansiRed       = "\033[38;5;196m"
-	ansiMagenta   = "\033[38;5;141m"
-	ansiBlue      = "\033[38;5;69m"
-	ansiOrange    = "\033[38;5;208m"
-	ansiBgGray    = "\033[48;5;236m"
-	ansiBgBlue    = "\033[48;5;24m"
+	ansiCyan      = theme.ANSIPrimary
+	ansiGreen     = theme.ANSISuccess
+	ansiYellow    = theme.ANSIWarning
+	ansiGray      = theme.ANSISubtleText
+	ansiDarkGray  = theme.ANSIMutedText
+	ansiWhite     = theme.ANSIText
+	ansiRed       = theme.ANSIDanger
+	ansiMagenta   = theme.ANSIAccent
+	ansiBlue      = theme.ANSIBlue
+	ansiOrange    = theme.ANSIOrange
+	ansiBgGray    = theme.ANSISurface
+	ansiBgBlue    = theme.ANSIPanel
 )
 
 // divider prints a soft horizontal rule the width of the content area.
@@ -443,7 +445,7 @@ func (a *Agent) printToolFooter(success bool, msg string) {
 	if a.UIMode {
 		fmt.Println()
 	} else {
-		fmt.Print("  \033[38;5;75m❯\033[0m\n") // persistent prompt (shell mode only)
+		fmt.Print("  " + ansiCyan + "❯" + ansiReset + "\n") // persistent prompt (shell mode only)
 	}
 }
 

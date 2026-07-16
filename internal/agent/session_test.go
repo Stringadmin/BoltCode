@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func withTempHomeForSessions(t *testing.T) func() {
@@ -11,11 +14,17 @@ func withTempHomeForSessions(t *testing.T) func() {
 	dir := t.TempDir()
 	oldProf := os.Getenv("USERPROFILE")
 	oldHome := os.Getenv("HOME")
+	oldMax := os.Getenv("BOLTCODE_SESSION_MAX")
+	oldRetention := os.Getenv("BOLTCODE_SESSION_RETENTION_DAYS")
 	os.Setenv("USERPROFILE", dir)
 	os.Setenv("HOME", dir)
+	os.Unsetenv("BOLTCODE_SESSION_MAX")
+	os.Unsetenv("BOLTCODE_SESSION_RETENTION_DAYS")
 	return func() {
 		os.Setenv("USERPROFILE", oldProf)
 		os.Setenv("HOME", oldHome)
+		os.Setenv("BOLTCODE_SESSION_MAX", oldMax)
+		os.Setenv("BOLTCODE_SESSION_RETENTION_DAYS", oldRetention)
 	}
 }
 
@@ -25,6 +34,7 @@ func TestSaveAndLoadSession(t *testing.T) {
 
 	a := &Agent{
 		Config:   Config{Provider: "deepseek", Model: "deepseek-chat", BaseURL: "https://api.deepseek.com/v1", ContextWindow: 256_000},
+		Mode:     ModePlan,
 		Workdir:  "/some/dir",
 		RepoRoot: "/some",
 		Intent:   "fix the bug",
@@ -60,6 +70,9 @@ func TestSaveAndLoadSession(t *testing.T) {
 	}
 	if loaded.ContextWindow != 256_000 {
 		t.Errorf("loaded context window = %d", loaded.ContextWindow)
+	}
+	if loaded.Mode != ModePlan {
+		t.Errorf("loaded mode = %q, want plan", loaded.Mode)
 	}
 	if len(loaded.Messages) != 2 {
 		t.Errorf("loaded %d messages, want 2", len(loaded.Messages))
@@ -168,5 +181,80 @@ func TestLoadSessionAcceptsWellFormedID(t *testing.T) {
 	// reject legitimate ids.
 	if _, err := LoadSession(id); err != nil {
 		t.Fatalf("LoadSession(legit %q): %v", id, err)
+	}
+}
+
+func TestCleanupSessionsEnforcesNewestFirstCap(t *testing.T) {
+	restore := withTempHomeForSessions(t)
+	defer restore()
+	now := time.Now()
+	for index := 0; index < 5; index++ {
+		writeSessionFixture(t, fmt.Sprintf("%08x", index+1), now.Add(-time.Duration(index)*time.Hour))
+	}
+
+	removed, err := cleanupSessions(now, "", sessionCleanupPolicy{MaxFiles: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed sessions = %d, want 2", removed)
+	}
+	sessions, err := ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 3 || sessions[0].ID != "00000001" || sessions[2].ID != "00000003" {
+		t.Fatalf("remaining sessions = %+v", sessions)
+	}
+}
+
+func TestCleanupSessionsExpiresOldFilesButProtectsActiveSession(t *testing.T) {
+	restore := withTempHomeForSessions(t)
+	defer restore()
+	now := time.Now()
+	writeSessionFixture(t, "00000001", now.Add(-48*time.Hour))
+	writeSessionFixture(t, "00000002", now.Add(-48*time.Hour))
+	writeSessionFixture(t, "00000003", now)
+
+	removed, err := cleanupSessions(now, "00000001", sessionCleanupPolicy{MaxAge: 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed sessions = %d, want 1", removed)
+	}
+	if _, err := LoadSession("00000001"); err != nil {
+		t.Fatalf("active session was removed: %v", err)
+	}
+	if _, err := LoadSession("00000002"); err == nil {
+		t.Fatal("expired inactive session was not removed")
+	}
+}
+
+func TestSessionCleanupPolicyEnvironmentOverrides(t *testing.T) {
+	t.Setenv("BOLTCODE_SESSION_MAX", "12")
+	t.Setenv("BOLTCODE_SESSION_RETENTION_DAYS", "7")
+	policy := sessionCleanupPolicyFromEnv()
+	if policy.MaxFiles != 12 || policy.MaxAge != 7*24*time.Hour {
+		t.Fatalf("cleanup policy = %+v", policy)
+	}
+
+	t.Setenv("BOLTCODE_SESSION_MAX", "0")
+	t.Setenv("BOLTCODE_SESSION_RETENTION_DAYS", "0")
+	policy = sessionCleanupPolicyFromEnv()
+	if policy.MaxFiles != 0 || policy.MaxAge != 0 {
+		t.Fatalf("disabled cleanup policy = %+v", policy)
+	}
+}
+
+func writeSessionFixture(t *testing.T, id string, updated time.Time) {
+	t.Helper()
+	session := Session{ID: id, Model: "test", UpdatedAt: updated, CreatedAt: updated}
+	data, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir(), id+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

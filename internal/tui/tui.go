@@ -13,6 +13,7 @@ import (
 
 	"github.com/Stringadmin/BoltCode/internal/command"
 	"github.com/Stringadmin/BoltCode/internal/model"
+	"github.com/Stringadmin/BoltCode/internal/theme"
 )
 
 // view tracks which screen the user is on.
@@ -65,22 +66,22 @@ func New(app *command.App) (Model, error) {
 var (
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("208"))
+			Foreground(lipgloss.Color(theme.ColorOrange))
 
 	selectedStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("white")).
-			Background(lipgloss.Color("62"))
+			Foreground(lipgloss.Color(theme.ColorText)).
+			Background(lipgloss.Color(theme.ColorSelection))
 
 	normalStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252"))
+			Foreground(lipgloss.Color(theme.ColorNormalText))
 
 	helpStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("241"))
+			Foreground(lipgloss.Color(theme.ColorMutedText))
 
 	statusStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("34"))
+			Foreground(lipgloss.Color(theme.ColorSuccess))
 )
 
 func (m Model) Init() tea.Cmd {
@@ -302,9 +303,9 @@ func (m Model) viewDiff() string {
 
 	for _, line := range lines[scroll:end] {
 		if strings.HasPrefix(line, "+") {
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Render(line) + "\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorSuccess)).Render(line) + "\n")
 		} else if strings.HasPrefix(line, "-") {
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(line) + "\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorDanger)).Render(line) + "\n")
 		} else {
 			b.WriteString(line + "\n")
 		}

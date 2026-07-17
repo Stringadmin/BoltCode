@@ -22,38 +22,53 @@ type toolTimelineEntry struct {
 }
 
 func (m *ChatModel) recordToolEvent(event agent.Event) {
-	switch event.Kind {
-	case agent.EventToolStarted:
-		m.toolTimeline = append(m.toolTimeline, toolTimelineEntry{
-			id:       event.ToolID,
-			name:     event.ToolName,
-			activity: event.Activity,
-			detail:   event.Detail,
-			running:  true,
-		})
-		if len(m.toolTimeline) > 100 {
-			m.toolTimeline = append([]toolTimelineEntry(nil), m.toolTimeline[len(m.toolTimeline)-100:]...)
-		}
-	case agent.EventToolFinished:
-		index := m.toolEntryIndex(event.ToolID)
-		if index < 0 {
-			m.toolTimeline = append(m.toolTimeline, toolTimelineEntry{id: event.ToolID, name: event.ToolName})
-			index = len(m.toolTimeline) - 1
-		}
-		entry := &m.toolTimeline[index]
-		entry.running = false
-		entry.failed = event.IsError
-		entry.duration = event.Duration
-		entry.result = truncateTimelineResult(event.Result, 6000)
-		if event.Detail != "" {
-			entry.detail = event.Detail
-		}
-		if event.Activity != "" {
-			entry.activity = event.Activity
+	// todo_write already has a dedicated visual plan panel. Keeping it in the
+	// persistent tool timeline produced a misleading "Plan · task list" row
+	// after the active plan had been retired.
+	if event.ToolName != "todo_write" {
+		switch event.Kind {
+		case agent.EventToolStarted:
+			m.toolTimeline = append(m.toolTimeline, toolTimelineEntry{
+				id:       event.ToolID,
+				name:     event.ToolName,
+				activity: event.Activity,
+				detail:   event.Detail,
+				running:  true,
+			})
+			if len(m.toolTimeline) > 100 {
+				m.toolTimeline = append([]toolTimelineEntry(nil), m.toolTimeline[len(m.toolTimeline)-100:]...)
+			}
+		case agent.EventToolFinished:
+			index := m.toolEntryIndex(event.ToolID)
+			if index < 0 {
+				m.toolTimeline = append(m.toolTimeline, toolTimelineEntry{id: event.ToolID, name: event.ToolName})
+				index = len(m.toolTimeline) - 1
+			}
+			entry := &m.toolTimeline[index]
+			entry.running = false
+			entry.failed = event.IsError
+			entry.duration = event.Duration
+			entry.result = truncateTimelineResult(event.Result, 6000)
+			if event.Detail != "" {
+				entry.detail = event.Detail
+			}
+			if event.Activity != "" {
+				entry.activity = event.Activity
+			}
 		}
 	}
 	if event.PlanItems != nil || event.ToolName == "todo_write" {
-		m.setPlanItems(event.PlanItems)
+		// Ready and tool events are consumed by independent Bubble Tea commands.
+		// A completed todo_write event can therefore arrive after agentReadyMsg.
+		// Never let that late event resurrect a plan already retired at ready.
+		if !m.busy && planItemsCompleted(event.PlanItems) {
+			m.setPlanItems(nil)
+			if m.agent != nil {
+				m.agent.TodoList = nil
+			}
+		} else {
+			m.setPlanItems(event.PlanItems)
+		}
 	} else if event.PlanTotal > 0 {
 		// Compatibility with callers/tests that only populate the compact plan
 		// counters rather than the structured snapshot.

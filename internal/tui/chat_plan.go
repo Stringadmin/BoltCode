@@ -34,10 +34,27 @@ func (m *ChatModel) setPlanItems(items []agent.TodoItem) {
 	}
 }
 
-func (m *ChatModel) clearCompletedPlanForNewTurn() {
+func (m *ChatModel) clearCompletedPlanForNewTurn() bool {
 	if m.planTotal > 0 && m.planDone == m.planTotal {
 		m.setPlanItems(nil)
+		if m.agent != nil {
+			m.agent.TodoList = nil
+		}
+		return true
 	}
+	return false
+}
+
+func planItemsCompleted(items []agent.TodoItem) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if item.Status != "completed" {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *ChatModel) renderPlanPanel() string {

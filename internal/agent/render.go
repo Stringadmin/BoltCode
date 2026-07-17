@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	xansi "github.com/charmbracelet/x/ansi"
+
 	"github.com/Stringadmin/BoltCode/internal/theme"
 )
 
@@ -233,10 +235,11 @@ func splitNumbered(s string) (label, rest string, ok bool) {
 	return label, rest, true
 }
 
-// renderTable turns buffered markdown table rows into an aligned, bordered
-// terminal table. The second row (|---|---|) is the alignment separator and is
-// consumed (not displayed as data). Column widths are computed from cell
-// content; CJK runes count as 1 here (good enough for our narrow tables).
+const maxTerminalTableWidth = 76
+
+// renderTable turns buffered markdown rows into a bounded, bordered terminal
+// table. Cells wrap inside their columns, so the chat viewport never has to
+// hard-wrap a completed table row and separate content from its borders.
 func renderTable(rows []string) []string {
 	if len(rows) == 0 {
 		return nil
@@ -258,14 +261,24 @@ func renderTable(rows []string) []string {
 	if len(grid) == 0 {
 		return nil
 	}
-	// Compute column widths using DISPLAY width (CJK = 2 columns) so aligned
-	// tables with Chinese text don't drift.
 	ncol := 0
 	for _, row := range grid {
 		if len(row) > ncol {
 			ncol = len(row)
 		}
 	}
+	if ncol == 0 {
+		return nil
+	}
+	for rowIndex := range grid {
+		for len(grid[rowIndex]) < ncol {
+			grid[rowIndex] = append(grid[rowIndex], "")
+		}
+		for column := range grid[rowIndex] {
+			grid[rowIndex][column] = cleanTableCell(grid[rowIndex][column])
+		}
+	}
+
 	width := make([]int, ncol)
 	for _, row := range grid {
 		for i, c := range row {
@@ -274,49 +287,120 @@ func renderTable(rows []string) []string {
 			}
 		}
 	}
-	pad := func(c string, w int) string {
-		dw := displayWidth(c)
-		if dw >= w {
-			return c
-		}
-		return c + strings.Repeat(" ", w-dw)
+	// Visible table overhead: "  │ " + inter-column " │ " + final " │".
+	contentBudget := maxTerminalTableWidth - 6 - 3*(ncol-1)
+	if contentBudget < ncol*4 {
+		contentBudget = ncol * 4
 	}
-	var out []string
-	for ri, row := range grid {
+	for column := range width {
+		if width[column] < 6 {
+			width[column] = 6
+		}
+		if width[column] > 40 {
+			width[column] = 40
+		}
+	}
+	shrinkTableColumns(width, contentBudget, 6)
+
+	border := func(left, middle, right string) string {
 		var b strings.Builder
-		b.WriteString(ansiDarkGray + "  │ ")
-		for i := 0; i < ncol; i++ {
-			cell := ""
-			if i < len(row) {
-				cell = row[i]
-			}
-			cell = pad(cell, width[i])
-			if ri == 0 {
-				b.WriteString(ansiBold + ansiWhite + cell + ansiReset)
-			} else {
-				b.WriteString(ansiGray + cell + ansiReset)
-			}
-			if i < ncol-1 {
-				b.WriteString(ansiDarkGray + " │ " + ansiReset)
+		b.WriteString(ansiDarkGray + "  " + left + "─")
+		for column, columnWidth := range width {
+			b.WriteString(strings.Repeat("─", columnWidth))
+			if column < ncol-1 {
+				b.WriteString("─" + middle + "─")
 			}
 		}
-		b.WriteString(ansiDarkGray + " │" + ansiReset)
-		out = append(out, b.String())
-		// Border between header and data.
-		if ri == 0 {
-			var sep strings.Builder
-			sep.WriteString(ansiDarkGray + "  ├─")
-			for i := 0; i < ncol; i++ {
-				sep.WriteString(strings.Repeat("─", width[i]))
-				if i < ncol-1 {
-					sep.WriteString("─┼─")
+		b.WriteString("─" + right + ansiReset)
+		return b.String()
+	}
+	pad := func(value string, target int) string {
+		return value + strings.Repeat(" ", max(0, target-displayWidth(value)))
+	}
+
+	out := []string{border("╭", "┬", "╮")}
+	for rowIndex, row := range grid {
+		wrapped := make([][]string, ncol)
+		rowHeight := 1
+		for column := 0; column < ncol; column++ {
+			wrapped[column] = wrapTableCell(row[column], width[column])
+			if len(wrapped[column]) > rowHeight {
+				rowHeight = len(wrapped[column])
+			}
+		}
+		for visualLine := 0; visualLine < rowHeight; visualLine++ {
+			var b strings.Builder
+			b.WriteString(ansiDarkGray + "  │ " + ansiReset)
+			for column := 0; column < ncol; column++ {
+				cell := ""
+				if visualLine < len(wrapped[column]) {
+					cell = wrapped[column][visualLine]
+				}
+				cell = pad(cell, width[column])
+				if rowIndex == 0 {
+					b.WriteString(ansiBold + ansiWhite + cell + ansiReset)
+				} else {
+					b.WriteString(ansiGray + cell + ansiReset)
+				}
+				if column < ncol-1 {
+					b.WriteString(ansiDarkGray + " │ " + ansiReset)
 				}
 			}
-			sep.WriteString("─┤" + ansiReset)
-			out = append(out, sep.String())
+			b.WriteString(ansiDarkGray + " │" + ansiReset)
+			out = append(out, b.String())
+		}
+		switch {
+		case rowIndex == 0:
+			out = append(out, border("├", "┼", "┤"))
+		case rowIndex < len(grid)-1:
+			out = append(out, border("├", "┼", "┤"))
 		}
 	}
+	out = append(out, border("╰", "┴", "╯"))
 	return out
+}
+
+func cleanTableCell(value string) string {
+	value = strings.ReplaceAll(value, "`", "")
+	value = strings.ReplaceAll(value, "**", "")
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func shrinkTableColumns(widths []int, budget, minimum int) {
+	for totalInts(widths) > budget {
+		largest := -1
+		for index, width := range widths {
+			if width > minimum && (largest < 0 || width > widths[largest]) {
+				largest = index
+			}
+		}
+		if largest < 0 {
+			return
+		}
+		widths[largest]--
+	}
+}
+
+func totalInts(values []int) int {
+	total := 0
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+func wrapTableCell(value string, width int) []string {
+	if value == "" {
+		return []string{""}
+	}
+	wrapped := strings.Split(xansi.WrapWc(value, width, "/\\_-"), "\n")
+	for index := range wrapped {
+		wrapped[index] = strings.TrimSpace(wrapped[index])
+		if displayWidth(wrapped[index]) > width {
+			wrapped[index] = xansi.Truncate(wrapped[index], width, "")
+		}
+	}
+	return wrapped
 }
 
 // isSeparatorRow reports whether a row is the markdown table alignment row
@@ -340,15 +424,7 @@ func isSeparatorRow(row []string) bool {
 // (fullwidth/wide) runes count as 2, everything else as 1. Good enough for
 // table alignment — we don't handle combining marks or zero-width chars.
 func displayWidth(s string) int {
-	n := 0
-	for _, r := range s {
-		if isWide(r) {
-			n += 2
-		} else {
-			n++
-		}
-	}
-	return n
+	return xansi.StringWidth(s)
 }
 
 // isWide reports whether r is a double-width rune (CJK ideographs, fullwidth

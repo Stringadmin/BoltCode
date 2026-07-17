@@ -98,6 +98,47 @@ func TestRenderMarkdownTable(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownTableWrapsLongCellsWithinTerminalBudget(t *testing.T) {
+	input := "| 文件 | 改动内容 |\n" +
+		"|---|---|\n" +
+		"| `internal/agent/loop.go` | `clearCompletedPlanForNewTurn()` 提前到输入循环最前面执行，解决 session 恢复时残留已完成 plan 的问题 |\n" +
+		"| `internal/tui/chat_tools.go` | `todo_write` 事件从 tool timeline 中排除，且晚到的 completed 事件不会复活已经退休的 plan |"
+	out := renderMarkdown(input)
+	lines := strings.Split(out, "\n")
+	if len(lines) < 8 {
+		t.Fatalf("long cells were not wrapped into readable rows:\n%s", out)
+	}
+	wantWidth := visibleWidth(lines[0])
+	for index, line := range lines {
+		if width := visibleWidth(line); width > maxTerminalTableWidth {
+			t.Errorf("table line %d width = %d, max %d: %q", index+1, width, maxTerminalTableWidth, stripAnsi(line))
+		}
+		if width := visibleWidth(line); width != wantWidth {
+			t.Errorf("table line %d width = %d, want aligned width %d: %q", index+1, width, wantWidth, stripAnsi(line))
+		}
+	}
+	plain := stripAnsi(out)
+	for _, want := range []string{"internal/agent/loop.go", "clearCompletedPlanForNewTurn()", "session", "internal/tui/chat_tools.go", "todo_write"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("wrapped table lost %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "`") {
+		t.Fatalf("inline-code delimiters leaked into table:\n%s", plain)
+	}
+}
+
+func TestRenderMarkdownTableKeepsCJKBordersAligned(t *testing.T) {
+	out := renderMarkdown("| 维度 | 状态 |\n|---|---|\n| 代码组织 | 清晰分层、职责明确 |\n| 用户体验 | 中文输入与鼠标选择正常工作 |")
+	lines := strings.Split(out, "\n")
+	want := visibleWidth(lines[0])
+	for index, line := range lines[1:] {
+		if got := visibleWidth(line); got != want {
+			t.Fatalf("CJK table line %d width = %d, want %d: %q", index+2, got, want, stripAnsi(line))
+		}
+	}
+}
+
 func TestRenderMarkdownNumberedMultiDigit(t *testing.T) {
 	out := renderMarkdown("10. 第十\n11. 第十一")
 	if !strings.Contains(out, "10.") || !strings.Contains(out, "11.") {

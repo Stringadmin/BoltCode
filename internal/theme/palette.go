@@ -3,6 +3,16 @@
 // share the same semantic palette.
 package theme
 
+// ── SGR codes ───────────────────────────────────────────────────────────
+const (
+	SGRReset     = "\033[0m"
+	SGRBold      = "\033[1m"
+	SGRDim       = "\033[2m"
+	SGRItalic    = "\033[3m"
+	SGRUnderline = "\033[4m"
+)
+
+// ── Semantic palette ─────────────────────────────────────────────────────
 const (
 	ColorPrimary     = "75"
 	ColorSuccess     = "78"
@@ -26,6 +36,7 @@ const (
 	ColorSelection   = "63"
 )
 
+// ── ANSI escape sequences ────────────────────────────────────────────────
 const (
 	ANSIPrimary     = "\033[38;5;" + ColorPrimary + "m"
 	ANSISuccess     = "\033[38;5;" + ColorSuccess + "m"

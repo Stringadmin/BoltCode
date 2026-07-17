@@ -55,6 +55,33 @@ func TestDispatchRoutesCompletionErrors(t *testing.T) {
 	}
 }
 
+func TestDispatchValidCompletionShells(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			if err := dispatch("completion", []string{shell}); err != nil {
+				t.Fatalf("dispatch(completion %s) = %v", shell, err)
+			}
+		})
+	}
+}
+
+func TestDispatchHelp(t *testing.T) {
+	for _, cmd := range []string{"help", "--help", "-h"} {
+		t.Run(cmd, func(t *testing.T) {
+			if err := dispatch(cmd, nil); err != nil {
+				t.Fatalf("dispatch(%s) = %v", cmd, err)
+			}
+		})
+	}
+}
+
+func TestDispatchCompletionNoArgsErrors(t *testing.T) {
+	err := dispatch("completion", nil)
+	if err == nil {
+		t.Fatal("dispatch(completion) with no args should error")
+	}
+}
+
 func TestDispatchRejectsUnknownCommand(t *testing.T) {
 	err := dispatch("definitely-not-a-command", nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown command") {
@@ -72,7 +99,7 @@ func TestDispatchProjectCommandsRequireInitializedWorkspace(t *testing.T) {
 	}
 	defer os.Chdir(previous)
 
-	for _, command := range []string{"status", "sync", "task", "review"} {
+	for _, command := range []string{"status", "sync", "task", "review", "submit", "approve", "merge", "reject", "diff", "push", "pull", "spec", "remote", "tui", "team"} {
 		t.Run(command, func(t *testing.T) {
 			if err := dispatch(command, nil); err == nil {
 				t.Fatalf("dispatch(%q) succeeded outside an initialized workspace", command)

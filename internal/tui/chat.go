@@ -200,6 +200,7 @@ func NewChat(a *agent.Agent) *ChatModel {
 		busySince:    time.Now(),
 	}
 	model.setPlanItems(a.TodoList)
+	model.clearCompletedPlanForNewTurn()
 	return model
 }
 
@@ -268,6 +269,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agentReadyMsg:
 		if !m.finished {
 			m.busy = false
+			m.clearCompletedPlanForNewTurn()
 			if m.recovering {
 				m.statusHint = "request failed · /retry or type a new message"
 				m.activity = "Waiting for recovery"

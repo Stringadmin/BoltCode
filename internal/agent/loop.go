@@ -458,6 +458,10 @@ func (a *Agent) waitForUserInput(inputFn func() string) (string, bool) {
 		if a.ShouldExit {
 			return "", false
 		}
+		// A completed plan remains visible through the final response, then is
+		// retired as soon as the agent returns to the input prompt. This also
+		// removes stale completed plans immediately when resuming a session.
+		a.clearCompletedPlanForNewTurn()
 		input := strings.TrimSpace(inputFn())
 		if input == "" {
 			continue
@@ -473,7 +477,6 @@ func (a *Agent) waitForUserInput(inputFn func() string) (string, bool) {
 		if input == "exit" || input == "done" || input == "quit" {
 			return "", false
 		}
-		a.clearCompletedPlanForNewTurn()
 		return input, true
 	}
 }

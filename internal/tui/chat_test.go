@@ -125,6 +125,71 @@ func TestNewUserMessageKeepsInProgressPlan(t *testing.T) {
 	}
 }
 
+func TestAgentReadyClearsCompletedPlanImmediately(t *testing.T) {
+	m := newChatTestModel()
+	m.setPlanItems([]agent.TodoItem{
+		{Content: "inspect", Status: "completed"},
+		{Content: "implement", Status: "completed"},
+	})
+	m.agent.TodoList = append([]agent.TodoItem(nil), m.planItems...)
+	m.Update(agentReadyMsg{})
+
+	if m.busy || m.planTotal != 0 || len(m.planItems) != 0 || len(m.agent.TodoList) != 0 {
+		t.Fatalf("ready state retained completed plan: busy=%v plan=%+v agent=%+v", m.busy, m.planItems, m.agent.TodoList)
+	}
+}
+
+func TestLateCompletedTodoEventCannotRestorePlanAfterReady(t *testing.T) {
+	m := newChatTestModel()
+	completed := []agent.TodoItem{
+		{Content: "inspect", Status: "completed"},
+		{Content: "implement", Status: "completed"},
+	}
+	m.setPlanItems(completed)
+	m.Update(agentReadyMsg{})
+	m.handleAgentEvent(agent.Event{
+		Kind:      agent.EventToolFinished,
+		ToolID:    "late-plan",
+		ToolName:  "todo_write",
+		PlanItems: completed,
+	})
+
+	if m.planTotal != 0 || len(m.planItems) != 0 || m.renderPlanPanel() != "" {
+		t.Fatalf("late todo event restored completed plan: %+v", m.planItems)
+	}
+	if len(m.toolTimeline) != 0 {
+		t.Fatalf("todo_write polluted tool timeline: %+v", m.toolTimeline)
+	}
+}
+
+func TestTodoWriteIsRenderedOnlyAsPlanPanel(t *testing.T) {
+	m := newChatTestModel()
+	m.recordToolEvent(agent.Event{Kind: agent.EventToolStarted, ToolID: "plan-1", ToolName: "todo_write"})
+	m.recordToolEvent(agent.Event{
+		Kind:      agent.EventToolFinished,
+		ToolID:    "plan-1",
+		ToolName:  "todo_write",
+		PlanItems: []agent.TodoItem{{Content: "work", Status: "in_progress"}},
+	})
+	if len(m.toolTimeline) != 0 {
+		t.Fatalf("todo_write appeared in tool timeline: %+v", m.toolTimeline)
+	}
+	if m.planTotal != 1 || !strings.Contains(ansi.Strip(m.renderPlanPanel()), "work") {
+		t.Fatalf("dedicated plan panel missing: %+v", m.planItems)
+	}
+}
+
+func TestNewChatDoesNotRestoreCompletedPlan(t *testing.T) {
+	a := &agent.Agent{
+		Config:   agent.Config{Model: "test-model"},
+		TodoList: []agent.TodoItem{{Content: "old task", Status: "completed"}},
+	}
+	m := NewChat(a)
+	if m.planTotal != 0 || len(m.planItems) != 0 || len(a.TodoList) != 0 {
+		t.Fatalf("completed resumed plan was restored: ui=%+v agent=%+v", m.planItems, a.TodoList)
+	}
+}
+
 func TestBusyChatRendersAnimatedActivityLayer(t *testing.T) {
 	m := newChatTestModel()
 	m.width = 80

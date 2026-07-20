@@ -5,7 +5,9 @@
 package shell
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/chzyer/readline"
+	"golang.org/x/term"
 
 	"github.com/Stringadmin/BoltCode/internal/banner"
 	"github.com/Stringadmin/BoltCode/internal/command"
@@ -56,6 +59,10 @@ type Session struct {
 	lastCtrlC time.Time
 	mu        sync.Mutex
 	sigCh     chan os.Signal // shared so launchAgent can temporarily grab signals
+	// scripted is true when stdin is not a terminal (pipe / file redirect):
+	// commands are executed line by line, and interactive-only commands are
+	// refused with a clear message instead of hanging in a broken TUI.
+	scripted bool
 }
 
 // readLine reads one line of user input using readline (with history + editing).
@@ -88,6 +95,16 @@ func Run(version string) error {
 		fmt.Println(infoStyle.Render("  not in a boltcode project"))
 		fmt.Println(infoStyle.Render("  run 'init' to set up, or cd into a project"))
 		fmt.Println()
+	}
+
+	// Piped or redirected stdin: readline can't work without a terminal — its
+	// first Readline fails, which previously made the REPL print "bye" and
+	// exit 0 without executing anything, so `echo status | boltcode` silently
+	// "succeeded" doing nothing. Run a plain line-by-line loop instead.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		s := &Session{App: app, scripted: true}
+		s.showStatus()
+		return s.loopScripted(os.Stdin)
 	}
 
 	// Tab completion for commands
@@ -216,6 +233,28 @@ func (s *Session) loop() {
 	}
 }
 
+// loopScripted runs the REPL over a non-interactive stdin (pipe or file
+// redirect): each line is executed as one command until EOF or an exit
+// command. Unlike the readline loop there is no prompt, no history, and no
+// double-Ctrl+C guard — input arrives all at once and output goes straight to
+// stdout, so scripts and CI can actually drive BoltCode.
+func (s *Session) loopScripted(r io.Reader) error {
+	fmt.Println(infoStyle.Render("  (non-interactive stdin — running commands line by line)"))
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if line == "exit" || line == "quit" || line == "q" {
+			return nil
+		}
+		s.exec(line)
+		fmt.Println()
+	}
+	return scanner.Err()
+}
+
 func historyPath() string {
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".boltcode")
@@ -227,6 +266,16 @@ func (s *Session) exec(line string) {
 	parts := strings.Fields(line)
 	cmd := parts[0]
 	args := parts[1:]
+
+	// In scripted mode these three would drop into an interactive wizard/TUI
+	// that can never receive input — refuse clearly instead of hanging.
+	if s.scripted {
+		switch cmd {
+		case "run", "config", "setup":
+			fmt.Println(infoStyle.Render("  '" + cmd + "' needs an interactive terminal — skipped"))
+			return
+		}
+	}
 
 	switch cmd {
 	case "help", "?":

@@ -2,7 +2,10 @@ package shell
 
 import (
 	"fmt"
+	"os"
 	"strings"
+
+	"golang.org/x/term"
 
 	"github.com/Stringadmin/BoltCode/internal/agent"
 	"github.com/Stringadmin/BoltCode/internal/command"
@@ -16,6 +19,12 @@ func Resume(version string, args []string) error {
 	// No id → list recent sessions and let the user pick.
 	if len(args) == 0 {
 		return listAndPickSession(version)
+	}
+	// Resuming drops into the full-screen chat, which can only work on a real
+	// terminal. With piped/redirected stdin it would block forever — fail
+	// clearly instead.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("resuming into the interactive chat needs a terminal (stdin is piped or redirected)")
 	}
 	id := strings.TrimSpace(args[0])
 	s, err := agent.LoadSession(id)
@@ -32,6 +41,14 @@ func listAndPickSession(version string) error {
 		return fmt.Errorf("no saved sessions — start one with 'boltcode' then 'run'")
 	}
 
+	// The picker is a full-screen TUI; without a terminal it hangs waiting for
+	// keys that never arrive. Print a plain list instead so scripts and pipes
+	// can still read the session ids.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		printSessionList(sessions)
+		return nil
+	}
+
 	selected, err := tui.PickSession(sessions)
 	if err != nil {
 		return err
@@ -40,6 +57,22 @@ func listAndPickSession(version string) error {
 		return nil
 	}
 	return startResumedAgent(version, selected)
+}
+
+// printSessionList is the non-interactive rendering of the session picker:
+// one line per session, newest first, with everything a script needs to pick
+// an id.
+func printSessionList(sessions []agent.Session) {
+	fmt.Println("saved sessions (newest first):")
+	for _, s := range sessions {
+		intent := s.Intent
+		if intent == "" {
+			intent = "(no intent)"
+		}
+		fmt.Printf("  %s  %s  %d msgs  %s\n",
+			s.ID, s.UpdatedAt.Format("2006-01-02 15:04"), len(s.Messages), intent)
+	}
+	fmt.Println("resume one from a terminal: boltcode --resume <id>")
 }
 
 // startResumedAgent re-enters the agent loop with a saved session's messages.

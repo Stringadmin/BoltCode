@@ -73,6 +73,21 @@ ARCHIVE="${TMPDIR}/${ARCHIVE_NAME}"
 echo "Downloading ${ARCHIVE_NAME}..."
 curl -fsSL --retry 3 --max-time 120 "$ASSET_URL" -o "$ARCHIVE"
 
+# Compute a SHA-256 hex digest of $1. GNU coreutils provides sha256sum
+# (Linux); macOS ships only shasum — calling sha256sum there aborts the
+# script under set -e right after the download succeeds. Fail closed if
+# neither exists: verification is the whole point of this block.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "Neither sha256sum nor shasum is available — cannot verify the download." >&2
+    exit 1
+  fi
+}
+
 # Verify the SHA-256 checksum published in the release. GoReleaser writes
 # checksums.txt as "<sha256>  <filename>" lines; fetch it, find the line for
 # this archive, and compare against the locally computed digest. This is the
@@ -86,7 +101,7 @@ if curl -fsSL --retry 3 --max-time 30 "$CHECKSUMS_URL" -o "$CHECKSUMS"; then
     echo "Refusing to install an unverified binary." >&2
     exit 1
   fi
-  ACTUAL=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+  ACTUAL=$(sha256_of "$ARCHIVE")
   if [ "$ACTUAL" != "$EXPECTED" ]; then
     echo "Checksum verification FAILED for ${ARCHIVE_NAME}." >&2
     echo "  expected: ${EXPECTED}" >&2

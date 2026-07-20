@@ -112,7 +112,7 @@ func TestCreateNewProfile(t *testing.T) {
 
 	// Picker: choose "n" (new), then fill fields.
 	a := &Agent{Config: pf.Profiles[0].ToConfig(),
-		InputFn: mockInput("n", "newprof", "anthropic", "sk-new", "claude-y", "", "256k")}
+		InputFn: mockInput("n", "newprof", "anthropic", "sk-new", "claude-y", "", "256k", "high")}
 	a.profilePicker()
 
 	if a.Config.APIKey != "sk-new" {
@@ -128,6 +128,9 @@ func TestCreateNewProfile(t *testing.T) {
 			}
 			if p.ContextWindow != 256_000 {
 				t.Errorf("new profile context = %d", p.ContextWindow)
+			}
+			if p.ReasoningEffort != ReasoningHigh {
+				t.Errorf("new profile reasoning effort = %q", p.ReasoningEffort)
 			}
 		}
 	}

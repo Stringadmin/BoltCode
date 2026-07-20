@@ -44,7 +44,12 @@ func (m *ChatModel) renderStatusBar() string {
 	if m.ready && !m.viewport.AtBottom() {
 		scroll = int(m.viewport.ScrollPercent() * 100)
 	}
-	right := chatDimStyle.Render(fmt.Sprintf("%s · %s · %s · ↕ %d%% · Shift+Tab mode · Ctrl+P sessions", m.model, m.mode, permission, scroll))
+	rightParts := []string{m.model, string(m.mode)}
+	if effort := agent.NormalizeReasoningEffort(m.agent.Config.ReasoningEffort); effort != agent.ReasoningAuto {
+		rightParts = append(rightParts, "think:"+string(effort))
+	}
+	rightParts = append(rightParts, permission, fmt.Sprintf("↕ %d%%", scroll), "Shift+Tab mode", "Ctrl+P sessions")
+	right := chatDimStyle.Render(strings.Join(rightParts, " · "))
 	primary := fitStatusLine(left+"  │  "+right, m.width)
 
 	window := m.agent.ContextWindow()

@@ -14,9 +14,9 @@ var fallbackToolCallSeq uint64
 
 // isAnthropicProvider returns true if the config points to an Anthropic-native
 // API. Provider "anthropic" (or empty, the default) uses the Anthropic
-// /v1/messages format. All other providers use the OpenAI /v1/chat/completions
-// format — the de facto standard for LLM API compatibility (volcengine ark,
-// deepseek, moonshot, qwen, etc.).
+// /v1/messages format. Other providers use either OpenAI Responses (Codex
+// endpoints) or Chat Completions (the common compatibility format used by
+// volcengine ark, deepseek, moonshot, qwen, etc.).
 func isAnthropicProvider(cfg Config) bool {
 	if cfg.Provider == "" {
 		return true
@@ -28,6 +28,9 @@ func isAnthropicProvider(cfg Config) bool {
 func providerURL(cfg Config) string {
 	if isAnthropicProvider(cfg) {
 		return buildURL(cfg.BaseURL)
+	}
+	if isResponsesProvider(cfg) {
+		return buildResponsesURL(cfg.BaseURL)
 	}
 	return buildOpenAIURL(cfg.BaseURL)
 }
@@ -56,6 +59,9 @@ func buildPayloadForMode(cfg Config, system string, messages []Message, mode Mod
 	tools := ToolsForMode(mode)
 	if isAnthropicProvider(cfg) {
 		return buildAnthropicPayloadWithTools(cfg, system, messages, tools)
+	}
+	if isResponsesProvider(cfg) {
+		return buildResponsesPayloadWithTools(cfg, system, messages, tools)
 	}
 	return buildOpenAIPayloadWithTools(cfg, system, messages, tools)
 }
@@ -93,8 +99,11 @@ func buildAnthropicPayloadWithTools(cfg Config, system string, messages []Messag
 		tools[len(tools)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
 	}
 	body["tools"] = tools
+	// Only send the thinking payload to models known to support it. An
+	// explicit non-auto effort must NOT force the field onto other models —
+	// the Anthropic API rejects "thinking" for them with a 400.
 	if supportsThinking(model) {
-		budgetTokens := 16000
+		budgetTokens := anthropicThinkingBudget(NormalizeReasoningEffort(cfg.ReasoningEffort))
 		body["thinking"] = map[string]interface{}{
 			"type":          "enabled",
 			"budget_tokens": budgetTokens,
@@ -126,6 +135,9 @@ func buildOpenAIPayloadWithTools(cfg Config, system string, messages []Message, 
 		},
 		"tools":      convertToolsToOpenAI(toolDefinitions),
 		"max_tokens": 8192,
+	}
+	if effort := NormalizeReasoningEffort(cfg.ReasoningEffort); effort != ReasoningAuto {
+		body["reasoning_effort"] = string(effort)
 	}
 	payload, _ := json.Marshal(body)
 	return payload
@@ -361,9 +373,10 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 					toolCalls[tc.Index] = &toolCallAccum{}
 				}
 				if tc.ID != "" {
-					if toolCalls[tc.Index].ID != "" && toolCalls[tc.Index].ID != tc.ID {
-						return nil, usage, fmt.Errorf("OpenAI-compatible stream changed tool id at index %d", tc.Index)
-					}
+					// Some OpenAI-compatible gateways replace the call ID on later
+					// chunks while keeping the same index, function and argument
+					// stream. The gateway validates tool output against its latest
+					// ID, so follow the most recent non-empty value.
 					toolCalls[tc.Index].ID = tc.ID
 				}
 				if tc.Function.Name != "" {

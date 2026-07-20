@@ -38,7 +38,7 @@ func TestLegacyConfigMigration(t *testing.T) {
 	restore := withTempHome(t)
 	defer restore()
 	// Write a legacy single-config agent.json.
-	legacy := Config{Provider: "anthropic", APIKey: "sk-legacy", Model: "claude-x", BaseURL: "https://p", ContextWindow: 256_000}
+	legacy := Config{Provider: "anthropic", APIKey: "sk-legacy", Model: "claude-x", BaseURL: "https://p", ContextWindow: 256_000, ReasoningEffort: ReasoningMedium}
 	dir := filepath.Dir(profilePath())
 	os.MkdirAll(dir, 0o700)
 	data, _ := json.Marshal(legacy)
@@ -57,6 +57,9 @@ func TestLegacyConfigMigration(t *testing.T) {
 	if pf.Profiles[0].ContextWindow != 256_000 {
 		t.Errorf("migrated context window = %d", pf.Profiles[0].ContextWindow)
 	}
+	if pf.Profiles[0].ReasoningEffort != ReasoningMedium {
+		t.Errorf("migrated reasoning effort = %q", pf.Profiles[0].ReasoningEffort)
+	}
 	if pf.Current != "default" {
 		t.Errorf("current = %q, want default", pf.Current)
 	}
@@ -70,7 +73,7 @@ func TestSaveSwitchSetModel(t *testing.T) {
 	pf := &ProfileFile{
 		Profiles: []Profile{
 			{Name: "anthropic", Provider: "anthropic", APIKey: "sk-a", Model: "claude-sonnet-4-20250514"},
-			{Name: "ark", Provider: "volc", APIKey: "sk-ark", Model: "glm-5.2", BaseURL: "https://ark", ContextWindow: 192_000},
+			{Name: "ark", Provider: "volc", APIKey: "sk-ark", Model: "glm-5.2", BaseURL: "https://ark", ContextWindow: 192_000, ReasoningEffort: ReasoningHigh},
 		},
 		Current: "anthropic",
 	}
@@ -103,7 +106,7 @@ func TestSaveSwitchSetModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Name != "ark" || p.BaseURL != "https://ark" || p.ContextWindow != 192_000 {
+	if p.Name != "ark" || p.BaseURL != "https://ark" || p.ContextWindow != 192_000 || p.ReasoningEffort != ReasoningHigh {
 		t.Errorf("switch returned wrong profile: %+v", p)
 	}
 	loaded2, _ := LoadProfiles()

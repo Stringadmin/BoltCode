@@ -336,7 +336,7 @@ func (m *ChatModel) handleAgentEvent(event agent.Event) {
 	switch event.Kind {
 	case agent.EventPhase:
 		m.activity = event.Activity
-		m.activityDetail = ""
+		m.activityDetail = event.Detail
 	case agent.EventToolStarted:
 		m.activity = event.Activity
 		m.activityDetail = event.Detail

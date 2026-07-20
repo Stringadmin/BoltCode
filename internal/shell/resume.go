@@ -81,6 +81,9 @@ func newAgentFromSession(cfg *agent.Config, s *agent.Session) *agent.Agent {
 	if s.ContextWindow > 0 {
 		a.Config.ContextWindow = s.ContextWindow
 	}
+	if s.ReasoningEffort != "" {
+		a.Config.ReasoningEffort = agent.NormalizeReasoningEffort(s.ReasoningEffort)
+	}
 	return a
 }
 

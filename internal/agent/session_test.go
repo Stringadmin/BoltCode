@@ -33,7 +33,7 @@ func TestSaveAndLoadSession(t *testing.T) {
 	defer restore()
 
 	a := &Agent{
-		Config:   Config{Provider: "deepseek", Model: "deepseek-chat", BaseURL: "https://api.deepseek.com/v1", ContextWindow: 256_000},
+		Config:   Config{Provider: "deepseek", Model: "deepseek-chat", BaseURL: "https://api.deepseek.com/v1", ContextWindow: 256_000, ReasoningEffort: ReasoningMedium},
 		Mode:     ModePlan,
 		Workdir:  "/some/dir",
 		RepoRoot: "/some",
@@ -70,6 +70,9 @@ func TestSaveAndLoadSession(t *testing.T) {
 	}
 	if loaded.ContextWindow != 256_000 {
 		t.Errorf("loaded context window = %d", loaded.ContextWindow)
+	}
+	if loaded.ReasoningEffort != ReasoningMedium {
+		t.Errorf("loaded reasoning effort = %q", loaded.ReasoningEffort)
 	}
 	if loaded.Mode != ModePlan {
 		t.Errorf("loaded mode = %q, want plan", loaded.Mode)

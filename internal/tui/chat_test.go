@@ -318,6 +318,25 @@ func TestRecoverableErrorOffersRetryWithoutEndingSession(t *testing.T) {
 	}
 }
 
+func TestPhaseEventKeepsRetryDetailInsideTUI(t *testing.T) {
+	m := newChatTestModel()
+	m.width = 120
+	m.height = 30
+	m.layout()
+	m.handleAgentEvent(agent.Event{
+		Kind:     agent.EventPhase,
+		Activity: "Retrying API request",
+		Detail:   "in 1s · stream changed tool id",
+	})
+	if m.activity != "Retrying API request" || m.activityDetail != "in 1s · stream changed tool id" {
+		t.Fatalf("retry activity = %q / %q", m.activity, m.activityDetail)
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "Retrying API request") || !strings.Contains(view, "stream changed tool id") {
+		t.Fatalf("retry detail missing from TUI frame:\n%s", view)
+	}
+}
+
 func TestStatusShowsContextPlanAndShortcutsWithoutCost(t *testing.T) {
 	a := &agent.Agent{
 		Config: agent.Config{Model: "deepseek-chat"},
@@ -341,6 +360,18 @@ func TestStatusShowsContextPlanAndShortcutsWithoutCost(t *testing.T) {
 	}
 	if strings.Contains(status, "$") {
 		t.Fatalf("status should not show estimated cost:\n%s", status)
+	}
+}
+
+func TestStatusShowsConfiguredReasoningEffort(t *testing.T) {
+	m := NewChat(&agent.Agent{Config: agent.Config{Model: "reasoner", ReasoningEffort: agent.ReasoningHigh}})
+	m.width = 140
+	m.height = 24
+	m.layout()
+	m.busy = false
+	status := ansi.Strip(m.renderStatusBar())
+	if !strings.Contains(status, "think:high") {
+		t.Fatalf("reasoning effort missing from status:\n%s", status)
 	}
 }
 

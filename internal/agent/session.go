@@ -50,19 +50,20 @@ func validSessionID(id string) bool {
 // level so sessions are visible across projects; the original Workdir is
 // recorded so resume can re-enter the right directory context.
 type Session struct {
-	ID            string     `json:"id"`
-	Workdir       string     `json:"workdir"`
-	RepoRoot      string     `json:"repo_root,omitempty"`
-	Intent        string     `json:"intent,omitempty"`
-	Mode          Mode       `json:"mode,omitempty"`
-	Provider      string     `json:"provider,omitempty"`
-	BaseURL       string     `json:"base_url,omitempty"`
-	Model         string     `json:"model"`
-	ContextWindow int        `json:"context_window,omitempty"`
-	Messages      []Message  `json:"messages"`
-	TodoList      []TodoItem `json:"todo_list,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID              string          `json:"id"`
+	Workdir         string          `json:"workdir"`
+	RepoRoot        string          `json:"repo_root,omitempty"`
+	Intent          string          `json:"intent,omitempty"`
+	Mode            Mode            `json:"mode,omitempty"`
+	Provider        string          `json:"provider,omitempty"`
+	BaseURL         string          `json:"base_url,omitempty"`
+	Model           string          `json:"model"`
+	ContextWindow   int             `json:"context_window,omitempty"`
+	ReasoningEffort ReasoningEffort `json:"reasoning_effort,omitempty"`
+	Messages        []Message       `json:"messages"`
+	TodoList        []TodoItem      `json:"todo_list,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
 }
 
 // sessionsDir returns ~/.boltcode/sessions/, creating it if needed.
@@ -100,19 +101,20 @@ func SaveSession(a *Agent) (string, error) {
 		created = *a.SessionCreatedAt
 	}
 	s := Session{
-		ID:            id,
-		Workdir:       a.Workdir,
-		RepoRoot:      a.RepoRoot,
-		Intent:        a.Intent,
-		Mode:          a.EffectiveMode(),
-		Provider:      a.Config.Provider,
-		BaseURL:       a.Config.BaseURL,
-		Model:         a.Config.Model,
-		ContextWindow: a.Config.ContextWindow,
-		Messages:      a.Messages,
-		TodoList:      a.TodoList,
-		CreatedAt:     created,
-		UpdatedAt:     now,
+		ID:              id,
+		Workdir:         a.Workdir,
+		RepoRoot:        a.RepoRoot,
+		Intent:          a.Intent,
+		Mode:            a.EffectiveMode(),
+		Provider:        a.Config.Provider,
+		BaseURL:         a.Config.BaseURL,
+		Model:           a.Config.Model,
+		ContextWindow:   a.Config.ContextWindow,
+		ReasoningEffort: a.Config.ReasoningEffort,
+		Messages:        a.Messages,
+		TodoList:        a.TodoList,
+		CreatedAt:       created,
+		UpdatedAt:       now,
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

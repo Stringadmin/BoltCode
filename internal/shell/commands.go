@@ -384,7 +384,7 @@ func (s *Session) runConfig(args []string) {
 			if window <= 0 {
 				window = agent.ModelContextWindow(p.Model)
 			}
-			fmt.Println(infoStyle.Render(fmt.Sprintf("        %s · %s · context %s", providerDisplay(p.Provider), p.Model, agent.FormatContextWindow(window))))
+			fmt.Println(infoStyle.Render(fmt.Sprintf("        %s · %s · context %s · thinking %s", providerDisplay(p.Provider), p.Model, agent.FormatContextWindow(window), agent.FormatReasoningEffort(p.ReasoningEffort))))
 		}
 		fmt.Println()
 	} else {
@@ -451,11 +451,11 @@ func (s *Session) runConfig(args []string) {
 	}
 	fmt.Println()
 	fmt.Println(okStyle.Render(fmt.Sprintf("  ✓ 档案 %q 已保存并设为当前", name)))
-	fmt.Println(infoStyle.Render(fmt.Sprintf("  %s · %s · context %s", providerDisplay(cfg.Provider), cfg.Model, agent.FormatContextWindow(cfg.ContextWindow))))
+	fmt.Println(infoStyle.Render(fmt.Sprintf("  %s · %s · context %s · thinking %s", providerDisplay(cfg.Provider), cfg.Model, agent.FormatContextWindow(cfg.ContextWindow), agent.FormatReasoningEffort(cfg.ReasoningEffort))))
 	fmt.Println(infoStyle.Render("  接下来可运行 run，或在会话中用 /profile 切换档案"))
 }
 
-// editProfileFields runs the navigable 5-field form for one profile, pre-filled
+// editProfileFields runs the navigable 6-field form for one profile, pre-filled
 // from prefill. Returns the completed config and ok=true on save, ok=false on
 // cancel.
 func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.Config, bool) {
@@ -472,6 +472,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 	}
 	baseURL := prefill.BaseURL
 	contextWindow := prefill.ContextWindow
+	reasoningEffort := agent.NormalizeReasoningEffort(prefill.ReasoningEffort)
 
 	const (
 		stepProvider = iota
@@ -479,6 +480,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 		stepModel
 		stepBaseURL
 		stepContextWindow
+		stepReasoningEffort
 		stepConfirm
 	)
 	step := stepProvider
@@ -486,7 +488,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 	for {
 		switch step {
 		case stepProvider:
-			renderConfigStep(1, 5, "选择服务商")
+			renderConfigStep(1, 6, "选择服务商")
 			for i, p := range agent.KnownProviders {
 				marker := " "
 				if strings.EqualFold(provider, p.ID) {
@@ -514,6 +516,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 					provider = picked.ID
 					baseURL = picked.BaseURL
 					contextWindow = 0
+					reasoningEffort = agent.ReasoningAuto
 					options := agent.ModelsForProvider(provider)
 					if len(options) > 0 {
 						model = options[0].ID
@@ -525,7 +528,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			step = stepAPIKey
 
 		case stepAPIKey:
-			renderConfigStep(2, 5, "配置 API Key")
+			renderConfigStep(2, 6, "配置 API Key")
 			shown := "未设置"
 			if apiKey != "" {
 				shown = "已设置 " + maskKey(apiKey)
@@ -549,7 +552,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			step = stepModel
 
 		case stepModel:
-			renderConfigStep(3, 5, "选择模型")
+			renderConfigStep(3, 6, "选择模型")
 			models := agent.AvailableModels(agent.Config{Provider: provider, BaseURL: baseURL, Model: model})
 			for i, option := range models {
 				marker := " "
@@ -590,7 +593,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			step = stepBaseURL
 
 		case stepBaseURL:
-			renderConfigStep(4, 5, "确认 API 地址")
+			renderConfigStep(4, 6, "确认 API 地址")
 			defaultURL := providerDefaultURL(provider)
 			shown := orDefault(baseURL, "服务商默认")
 			if providerRequiresBaseURL(provider) {
@@ -623,7 +626,7 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			step = stepContextWindow
 
 		case stepContextWindow:
-			renderConfigStep(5, 5, "配置上下文窗口")
+			renderConfigStep(5, 6, "配置上下文窗口")
 			effective := contextWindow
 			shown := agent.FormatContextWindow(contextWindow)
 			if effective <= 0 {
@@ -648,6 +651,51 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 				}
 				contextWindow = parsed
 			}
+			step = stepReasoningEffort
+
+		case stepReasoningEffort:
+			renderConfigStep(6, 6, "配置思考强度")
+			options := []struct {
+				value agent.ReasoningEffort
+				desc  string
+			}{
+				{agent.ReasoningAuto, "保持服务商或 BoltCode 既有默认；兼容性最好"},
+				{agent.ReasoningLow, "更快、消耗更少，适合简单修改"},
+				{agent.ReasoningMedium, "速度与推理深度平衡"},
+				{agent.ReasoningHigh, "更深入，适合复杂架构和调试"},
+			}
+			for index, option := range options {
+				marker := " "
+				if reasoningEffort == option.value {
+					marker = "●"
+				}
+				fmt.Printf("  %s %d. %-6s %s\n", marker, index+1, option.value, option.desc)
+			}
+			fmt.Println(infoStyle.Render("  Anthropic 会映射为 thinking token budget；OpenAI 兼容接口使用 reasoning_effort"))
+			in, back, cancel := s.askWithBack(fmt.Sprintf("  选择编号或强度 [%s]: ", agent.FormatReasoningEffort(reasoningEffort)))
+			if cancel {
+				return nil, false
+			}
+			if back {
+				step = stepContextWindow
+				continue
+			}
+			if in != "" {
+				if number, err := strconv.Atoi(in); err == nil {
+					if number < 1 || number > len(options) {
+						fmt.Println(errStyle.Render("  思考强度编号超出范围"))
+						continue
+					}
+					reasoningEffort = options[number-1].value
+				} else {
+					parsed, err := agent.ParseReasoningEffort(in)
+					if err != nil {
+						fmt.Println(errStyle.Render("  " + err.Error()))
+						continue
+					}
+					reasoningEffort = parsed
+				}
+			}
 			step = stepConfirm
 
 		case stepConfirm:
@@ -662,21 +710,22 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 				contextLabel = fmt.Sprintf("auto (%s)", agent.FormatContextWindow(agent.ModelContextWindow(model)))
 			}
 			fmt.Printf("  5  上下文    %s tokens\n", contextLabel)
+			fmt.Printf("  6  思考强度  %s\n", agent.FormatReasoningEffort(reasoningEffort))
 			fmt.Println(infoStyle.Render("     档案名    " + name))
 			fmt.Println()
-			in, back, cancel := s.askWithBack("  回车/Y 保存 · 1-5 修改对应项 · q 取消: ")
+			in, back, cancel := s.askWithBack("  回车/Y 保存 · 1-6 修改对应项 · q 取消: ")
 			if cancel {
 				return nil, false
 			}
 			if back {
-				step = stepContextWindow
+				step = stepReasoningEffort
 				continue
 			}
 			switch strings.ToLower(in) {
 			case "q", "quit", "cancel":
 				return nil, false
 			case "b", "back":
-				step = stepBaseURL
+				step = stepReasoningEffort
 				continue
 			case "1":
 				step = stepProvider
@@ -693,16 +742,20 @@ func (s *Session) editProfileFields(name string, prefill *agent.Config) (*agent.
 			case "5":
 				step = stepContextWindow
 				continue
+			case "6":
+				step = stepReasoningEffort
+				continue
 			case "", "y", "yes":
 				return &agent.Config{
-					Provider:      provider,
-					APIKey:        apiKey,
-					Model:         model,
-					BaseURL:       baseURL,
-					ContextWindow: contextWindow,
+					Provider:        provider,
+					APIKey:          apiKey,
+					Model:           model,
+					BaseURL:         baseURL,
+					ContextWindow:   contextWindow,
+					ReasoningEffort: reasoningEffort,
 				}, true
 			default:
-				fmt.Println(errStyle.Render("  请输入 Y、1-5 或 q"))
+				fmt.Println(errStyle.Render("  请输入 Y、1-6 或 q"))
 			}
 		}
 	}

@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,6 +50,119 @@ func TestRetryOnServerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "after 4 attempts") {
 		t.Errorf("error = %q, want it to mention attempt count", err.Error())
+	}
+}
+
+func TestRetryProgressUsesStructuredEventInUIMode(t *testing.T) {
+	restore := withStubs(t)
+	defer restore()
+
+	var fallback bytes.Buffer
+	stderrWriter = &fallback
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	var events []Event
+	a := &Agent{
+		Config:  Config{BaseURL: srv.URL, APIKey: "k"},
+		UIMode:  true,
+		EventFn: func(event Event) { events = append(events, event) },
+	}
+	_, _, err := a.callAPI("sys")
+	if err == nil {
+		t.Fatal("expected error from repeated 502s")
+	}
+	if fallback.Len() != 0 {
+		t.Fatalf("TUI retry wrote directly to stderr: %q", fallback.String())
+	}
+	if len(events) != 3 {
+		t.Fatalf("retry event count = %d, want 3", len(events))
+	}
+	for _, event := range events {
+		if event.Kind != EventPhase || event.Activity != "Retrying API request" || !strings.Contains(event.Detail, "API 502") {
+			t.Fatalf("unexpected retry event: %+v", event)
+		}
+	}
+}
+
+func TestMissingToolOutputIDIsReboundAndRetried(t *testing.T) {
+	restore := withStubs(t)
+	defer restore()
+
+	var hits int32
+	var repairedPayload bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"message":"No tool output found for function call call_latest.","type":"invalid_request_error"}}`)
+			return
+		}
+
+		var body struct {
+			Messages []struct {
+				Role       string `json:"role"`
+				ToolCallID string `json:"tool_call_id"`
+				ToolCalls  []struct {
+					ID string `json:"id"`
+				} `json:"tool_calls"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode repaired payload: %v", err)
+		}
+		var assistantID, resultID string
+		for _, message := range body.Messages {
+			if message.Role == "assistant" && len(message.ToolCalls) == 1 {
+				assistantID = message.ToolCalls[0].ID
+			}
+			if message.Role == "tool" {
+				resultID = message.ToolCallID
+			}
+		}
+		repairedPayload = assistantID == "call_latest" && resultID == "call_latest"
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	var events []Event
+	a := &Agent{
+		Config: Config{Provider: "openai", BaseURL: srv.URL, APIKey: "k", Model: "gpt-test"},
+		Messages: []Message{
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "tool_use", "id": "call_earlier", "name": "read_file", "input": map[string]interface{}{"path": "main.go"}},
+			}},
+			{Role: "user", Content: []map[string]interface{}{
+				{"type": "tool_result", "tool_use_id": "call_earlier", "content": "package main"},
+			}},
+		},
+		UIMode:  true,
+		EventFn: func(event Event) { events = append(events, event) },
+	}
+	if _, _, err := a.callAPI("sys"); err != nil {
+		t.Fatalf("repaired request failed: %v", err)
+	}
+	if hits != 2 || !repairedPayload {
+		t.Fatalf("repair attempts=%d payloadRebound=%v", hits, repairedPayload)
+	}
+	if got := messageContentBlocks(a.Messages[0].Content)[0]["id"]; got != "call_latest" {
+		t.Fatalf("assistant call id = %v", got)
+	}
+	if got := messageContentBlocks(a.Messages[1].Content)[0]["tool_use_id"]; got != "call_latest" {
+		t.Fatalf("tool result id = %v", got)
+	}
+	foundRepairEvent := false
+	for _, event := range events {
+		if event.Activity == "Repairing tool call sequence" && event.Detail == "call_latest" {
+			foundRepairEvent = true
+		}
+	}
+	if !foundRepairEvent {
+		t.Fatalf("repair event missing: %+v", events)
 	}
 }
 

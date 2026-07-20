@@ -190,6 +190,15 @@ func (a *Agent) handleSlashCommand(input string) bool {
 		return true
 	case input == "/context":
 		return a.showContext()
+
+	case input == "/retry":
+		// /retry does its work inside the recovery prompt shown right after a
+		// failed API request (see waitForRecoveryInput). At the normal prompt
+		// the previous request succeeded, so there is nothing to retry — say
+		// so instead of falling through to "unknown command", which would
+		// contradict the /help listing.
+		fmt.Println("\n  " + ansiGray + "nothing to retry — /retry is available right after a failed request" + ansiReset)
+		return true
 	}
 	return false
 }
@@ -328,7 +337,7 @@ func (a *Agent) profilePicker() bool {
 			}
 			a.Config = picked.ToConfig()
 			fmt.Printf("\n  "+ansiGreen+"✓ active profile: %s"+ansiReset+"\n", picked.Name)
-			fmt.Printf("  "+ansiGray+"provider: %s, model: %s"+ansiReset+"\n", picked.Provider, picked.Model)
+			fmt.Printf("  "+ansiGray+"provider: %s, model: %s, thinking: %s"+ansiReset+"\n", picked.Provider, picked.Model, FormatReasoningEffort(picked.ReasoningEffort))
 			return true
 		}
 	}
@@ -479,8 +488,14 @@ func (a *Agent) createNewProfile() bool {
 		fmt.Println("  " + ansiRed + parseErr.Error() + ansiReset)
 		return false
 	}
+	reasoningRaw := strings.TrimSpace(a.readWith("  reasoning effort (auto/low/medium/high) [auto]: "))
+	reasoningEffort, parseErr := ParseReasoningEffort(reasoningRaw)
+	if parseErr != nil {
+		fmt.Println("  " + ansiRed + parseErr.Error() + ansiReset)
+		return false
+	}
 
-	cfg := &Config{Provider: provider, APIKey: apiKey, Model: model, BaseURL: baseURL, ContextWindow: contextWindow}
+	cfg := &Config{Provider: provider, APIKey: apiKey, Model: model, BaseURL: baseURL, ContextWindow: contextWindow, ReasoningEffort: reasoningEffort}
 	if err := SaveProfile(name, cfg); err != nil {
 		fmt.Printf("  "+ansiRed+"✗ save failed: %v"+ansiReset+"\n", err)
 		return false
@@ -505,7 +520,7 @@ func (a *Agent) showProfiles() bool {
 		if p.Name == pf.Current {
 			marker = ansiGreen + "▶ " + ansiReset
 		}
-		fmt.Printf("  %s%-16s %s / %s\n", marker, p.Name, ansiGray+p.Provider+ansiReset, ansiGray+p.Model+ansiReset)
+		fmt.Printf("  %s%-16s %s / %s / thinking %s\n", marker, p.Name, ansiGray+p.Provider+ansiReset, ansiGray+p.Model+ansiReset, FormatReasoningEffort(p.ReasoningEffort))
 	}
 	fmt.Println("\n  " + ansiDarkGray + "switch with: /profile" + ansiReset)
 	return true
@@ -520,7 +535,7 @@ func (a *Agent) switchProfile(name string) bool {
 	}
 	a.Config = p.ToConfig()
 	fmt.Printf("\n  "+ansiGreen+"✓ active profile: %s"+ansiReset+"\n", p.Name)
-	fmt.Printf("  "+ansiGray+"provider: %s, model: %s"+ansiReset+"\n", p.Provider, p.Model)
+	fmt.Printf("  "+ansiGray+"provider: %s, model: %s, thinking: %s"+ansiReset+"\n", p.Provider, p.Model, FormatReasoningEffort(p.ReasoningEffort))
 	return true
 }
 

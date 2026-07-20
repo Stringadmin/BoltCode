@@ -21,7 +21,7 @@ func TestKnownSlashCommandsHandled(t *testing.T) {
 		Messages: []Message{{Role: "user", Content: "hi"}},
 		InputFn:  func() string { return "q" },
 	}
-	known := []string{"/help", "/tokens", "/time", "/model", "/context", "/sessions", "/files", "/diff", "/clear"}
+	known := []string{"/help", "/tokens", "/time", "/model", "/context", "/sessions", "/files", "/diff", "/clear", "/retry"}
 	for _, cmd := range known {
 		if !a.handleSlashCommand(cmd) {
 			t.Errorf("known command %q was not handled", cmd)

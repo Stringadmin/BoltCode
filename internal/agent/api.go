@@ -50,6 +50,7 @@ func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
 	client := &http.Client{Timeout: 5 * time.Minute}
 
 	var lastErr error
+	repairedMissingToolOutput := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Rebuild the request each attempt: the request body reader is
 		// consumed by client.Do, so it can't be reused across calls.
@@ -63,6 +64,15 @@ func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
 			return nil, Usage{}, ctx.Err()
 		}
 		if !retryable {
+			if !repairedMissingToolOutput && !isAnthropicProvider(a.Config) {
+				callID := missingToolOutputCallID(err)
+				if rebindLatestSingleToolCall(a.Messages, callID) {
+					repairedMissingToolOutput = true
+					payload = buildPayloadForMode(a.Config, system, a.Messages, mode)
+					a.reportProtocolRepair(callID)
+					continue
+				}
+			}
 			// Non-retryable failure (4xx auth/bad request) — surface now.
 			return nil, Usage{}, err
 		}
@@ -78,7 +88,7 @@ func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
 				backoff = 8 * time.Second
 			}
 		}
-		fmt.Fprintf(stderr(), "  api: %v — retrying in %s\n", lastErr, wait)
+		a.reportRetry(lastErr, wait)
 		sleepFn(wait)
 	}
 
@@ -119,6 +129,8 @@ func (a *Agent) doOnce(ctx context.Context, client *http.Client, url string, pay
 		var perr error
 		if isAnthropicProvider(a.Config) {
 			content, usage, perr = a.parseStream(resp.Body)
+		} else if isResponsesProvider(a.Config) {
+			content, usage, perr = a.parseResponsesStream(resp.Body)
 		} else {
 			content, usage, perr = a.parseOpenAIStream(resp.Body)
 		}
@@ -178,6 +190,51 @@ func stderr() io.Writer {
 		return io.Discard
 	}
 	return stderrWriter
+}
+
+// reportRetry keeps full-screen frontends synchronized with the runtime. A
+// direct stderr write moves the terminal cursor behind Bubble Tea's back and
+// leaves duplicated status/input rows on the next repaint. Structured events
+// let the TUI render the notice inside its own frame; the classic shell keeps
+// the existing stderr progress line.
+func (a *Agent) reportRetry(err error, wait time.Duration) {
+	if a.UIMode && a.EventFn != nil {
+		detail := fmt.Sprintf("in %s · %s", wait, truncate(err.Error(), 96))
+		a.emit(Event{Kind: EventPhase, Activity: "Retrying API request", Detail: detail})
+		return
+	}
+	fmt.Fprintf(stderr(), "  api: %v — retrying in %s\n", err, wait)
+}
+
+func (a *Agent) reportProtocolRepair(callID string) {
+	if a.UIMode && a.EventFn != nil {
+		a.emit(Event{Kind: EventPhase, Activity: "Repairing tool call sequence", Detail: callID})
+		return
+	}
+	fmt.Fprintf(stderr(), "  api: repairing tool output id %s and retrying\n", callID)
+}
+
+func missingToolOutputCallID(err error) string {
+	if err == nil {
+		return ""
+	}
+	const marker = "No tool output found for function call"
+	message := err.Error()
+	start := strings.Index(message, marker)
+	if start < 0 {
+		return ""
+	}
+	rest := strings.TrimLeft(message[start+len(marker):], " :\t\r\n\"'")
+	end := 0
+	for end < len(rest) {
+		c := rest[end]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+			end++
+			continue
+		}
+		break
+	}
+	return rest[:end]
 }
 
 // streamBlock tracks a content block being assembled from SSE deltas.
@@ -485,6 +542,9 @@ func (a *Agent) callAPINonStreaming() ([]byte, error) {
 
 // callOpenAINonStreaming makes a non-streaming OpenAI API call for compaction.
 func (a *Agent) callOpenAINonStreaming() ([]byte, error) {
+	if isResponsesProvider(a.Config) {
+		return a.callResponsesNonStreaming()
+	}
 	url := buildOpenAIURL(a.Config.BaseURL)
 	model := a.Config.Model
 	if model == "" {
@@ -523,6 +583,45 @@ func (a *Agent) callOpenAINonStreaming() ([]byte, error) {
 	}
 
 	return parseOpenAINonStreaming(resp.Body)
+}
+
+// callResponsesNonStreaming is the quiet compaction path for Responses API
+// providers. Codex gateways may return SSE even for summary requests, so use
+// the same parser without rendering the assistant text into the terminal.
+func (a *Agent) callResponsesNonStreaming() ([]byte, error) {
+	url := buildResponsesURL(a.Config.BaseURL)
+	payload := buildResponsesPayloadWithTools(
+		a.Config,
+		"You are a helpful assistant that summarizes conversation history concisely.",
+		a.Messages,
+		nil,
+	)
+
+	ctx, cancel := context.WithTimeout(a.context(), 60*time.Second)
+	a.setCurrentCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearCurrentCancel()
+	}()
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
+
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var errBody bytes.Buffer
+		errBody.ReadFrom(resp.Body)
+		return nil, fmt.Errorf("API %d: %s", resp.StatusCode, truncateStr(string(errBody.Bytes()), 200, "..."))
+	}
+	content, _, err := parseResponsesStream(resp.Body, false)
+	return content, err
 }
 
 // supportsThinking reports whether a model name supports extended thinking.

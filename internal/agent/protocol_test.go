@@ -104,6 +104,43 @@ func TestOpenAIAllowsPositionallyPairedMissingIDsButAnthropicDoesNot(t *testing.
 	}
 }
 
+func TestRebindLatestSingleToolCallUpdatesCallAndResultTogether(t *testing.T) {
+	messages := []Message{
+		{Role: "assistant", Content: []interface{}{
+			map[string]interface{}{"type": "tool_use", "id": "call_old", "name": "read_file", "input": map[string]interface{}{}},
+		}},
+		{Role: "user", Content: []map[string]interface{}{
+			{"type": "tool_result", "tool_use_id": "call_old", "content": "ok"},
+		}},
+	}
+	if !rebindLatestSingleToolCall(messages, "call_new") {
+		t.Fatal("single tool call was not rebound")
+	}
+	if err := validateToolMessageSequence(messages, false); err != nil {
+		t.Fatalf("rebound sequence invalid: %v", err)
+	}
+	if got := messageContentBlocks(messages[0].Content)[0]["id"]; got != "call_new" {
+		t.Fatalf("call id = %v", got)
+	}
+	if got := messageContentBlocks(messages[1].Content)[0]["tool_use_id"]; got != "call_new" {
+		t.Fatalf("result id = %v", got)
+	}
+
+	multi := []Message{
+		{Role: "assistant", Content: []interface{}{
+			map[string]interface{}{"type": "tool_use", "id": "a", "name": "read_file", "input": map[string]interface{}{}},
+			map[string]interface{}{"type": "tool_use", "id": "b", "name": "list_files", "input": map[string]interface{}{}},
+		}},
+		{Role: "user", Content: []map[string]interface{}{
+			{"type": "tool_result", "tool_use_id": "a", "content": "a"},
+			{"type": "tool_result", "tool_use_id": "b", "content": "b"},
+		}},
+	}
+	if rebindLatestSingleToolCall(multi, "unknown") {
+		t.Fatal("ambiguous multi-call turn must not be rebound")
+	}
+}
+
 func TestEmptyProviderStreamsFailClearly(t *testing.T) {
 	a := &Agent{}
 	if _, _, err := a.parseStream(strings.NewReader("")); err == nil {

@@ -128,6 +128,30 @@ func TestParseOpenAIStreamAssemblesFragmentedParallelTools(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsesLatestIDWhenGatewayChangesLaterChunk(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_stable","function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_regenerated","function":{"arguments":"\"main.go\"}"}}]}}]}`,
+		"data: [DONE]",
+		"",
+	}, "\n")
+	a := &Agent{}
+	data, _, err := a.parseOpenAIStream(strings.NewReader(stream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []map[string]interface{}
+	if err := json.Unmarshal(data, &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || blocks[0]["id"] != "call_regenerated" {
+		t.Fatalf("tool call did not adopt the gateway's latest ID: %#v", blocks)
+	}
+	if blocks[0]["input"].(map[string]interface{})["path"] != "main.go" {
+		t.Fatalf("tool arguments were not assembled: %#v", blocks)
+	}
+}
+
 func TestOpenAIToolErrorIsVisibleToModel(t *testing.T) {
 	messages := []Message{
 		{Role: "assistant", Content: []interface{}{

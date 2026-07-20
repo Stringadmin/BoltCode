@@ -56,3 +56,37 @@ func TestIsHostedPlatform(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateRemoteURL(t *testing.T) {
+	valid := []string{
+		"git@github.com:user/repo.git",
+		"https://github.com/user/repo.git",
+		"http://gitee.com/u/r.git",
+		"root@192.168.1.1:repo.git",
+		"deploy@myserver.com:/opt/repos/project.git",
+		"  git@github.com:user/repo.git  ", // surrounding whitespace is trimmed
+	}
+	for _, url := range valid {
+		if err := ValidateRemoteURL(url); err != nil {
+			t.Errorf("ValidateRemoteURL(%q) = %v, want nil", url, err)
+		}
+	}
+
+	invalid := []string{
+		"not-a-url",                          // bare word — accepted before this check existed
+		"",                                   // empty
+		"https://github.com",                 // host only, no path
+		"https://github.com/",                // empty path
+		"ssh://git@github.com/user/repo.git", // valid git transport, unsupported shape here
+		"/local/path/repo.git",               // local path
+		"git@github.com",                     // missing :path
+		"git@:repo.git",                      // empty host
+		"git@github.com:",                    // empty path
+		"git user@host:repo.git",             // embedded whitespace
+	}
+	for _, url := range invalid {
+		if err := ValidateRemoteURL(url); err == nil {
+			t.Errorf("ValidateRemoteURL(%q) = nil, want error", url)
+		}
+	}
+}

@@ -83,6 +83,11 @@ func (a *App) SaveRemoteConfig(rc *RemoteConfig) error {
 
 // RemoteAdd records the server URL and registers it as a git remote.
 func (a *App) RemoteAdd(url, name string) error {
+	// Validate up front: this used to accept any string (e.g. "not-a-url") and
+	// only blow up later, deep inside the setup flow, with a confusing error.
+	if err := ValidateRemoteURL(url); err != nil {
+		return err
+	}
 	if name == "" {
 		name = "origin"
 	}
@@ -141,6 +146,50 @@ func ParseRemoteURL(url string) (user, host, path string, err error) {
 		return "", "", "", fmt.Errorf("invalid remote URL %q (expected user@host:path)", url)
 	}
 	return url[:at], url[at+1 : colon], url[colon+1:], nil
+}
+
+// ValidateRemoteURL checks a remote URL against the transport forms BoltCode
+// can actually work with end to end: HTTPS (https://host/path) and the
+// scp-like SSH shape (git@host:user/repo.git for hosted platforms,
+// user@host:path for self-hosted servers). Anything else — bare words, ssh://
+// URLs, local paths, partial URLs — is rejected here with the accepted forms,
+// because the self-hosted setup flow parses remotes as user@host:path and
+// would fail on those shapes later with a less helpful error.
+func ValidateRemoteURL(url string) error {
+	u := strings.TrimSpace(url)
+	if u == "" {
+		return fmt.Errorf("remote URL is empty\n  accepted forms: git@github.com:user/repo.git  |  https://github.com/user/repo.git  |  user@host:path")
+	}
+	if strings.ContainsAny(u, " \t\r\n") {
+		return fmt.Errorf("invalid remote URL %q: must not contain whitespace", url)
+	}
+	// HTTPS transport: https://host/path (http:// tolerated for legacy setups).
+	if rest, ok := strings.CutPrefix(u, "https://"); ok {
+		return validateHTTPSRemote(u, rest)
+	}
+	if rest, ok := strings.CutPrefix(u, "http://"); ok {
+		return validateHTTPSRemote(u, rest)
+	}
+	// ssh:// is a valid git transport, but the self-hosted flow parses remotes
+	// as user@host:path — ask for that shape rather than half-supporting this.
+	if strings.HasPrefix(u, "ssh://") {
+		return fmt.Errorf("invalid remote URL %q: use the scp-like form instead, e.g. git@github.com:user/repo.git", url)
+	}
+	// scp-like SSH: user@host:path, all parts non-empty.
+	if user, host, path, err := ParseRemoteURL(u); err == nil && user != "" && host != "" && path != "" {
+		return nil
+	}
+	return fmt.Errorf("invalid remote URL %q\n  accepted forms: git@github.com:user/repo.git  |  https://github.com/user/repo.git  |  user@host:path", url)
+}
+
+// validateHTTPSRemote requires a host and a non-empty path after the scheme:
+// "https://github.com/user/repo.git", not "https://github.com".
+func validateHTTPSRemote(full, rest string) error {
+	slash := strings.Index(rest, "/")
+	if slash <= 0 || slash == len(rest)-1 {
+		return fmt.Errorf("invalid remote URL %q (expected https://host/path, e.g. https://github.com/user/repo.git)", full)
+	}
+	return nil
 }
 
 // TestSSH tries to connect to the server and run a simple command. Returns nil

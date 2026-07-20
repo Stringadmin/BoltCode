@@ -44,3 +44,16 @@ func (r *Repo) RemoveWorktree(path string, force bool) error {
 	_, err := r.run(args...)
 	return err
 }
+
+// DeleteBranch removes a task branch. With force=false git itself refuses to
+// delete an unmerged branch — the right guard right after a merge, since the
+// merged check comes for free. Pass force=true only for abandoned tasks,
+// where discarding unmerged work is the whole point.
+func (r *Repo) DeleteBranch(name string, force bool) error {
+	flag := "-d"
+	if force {
+		flag = "-D"
+	}
+	_, err := r.run("branch", flag, name)
+	return err
+}

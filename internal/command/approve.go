@@ -92,5 +92,15 @@ func (a *App) ApproveAndMerge(proposalID, author string) (*model.Task, error) {
 	if err := a.Store.SaveTask(t); err != nil {
 		return nil, err
 	}
+
+	// The branch's commits now live in the base branch, so the task's worktree
+	// and branch are pure residue — clean both. ResolveWorktree is mandatory:
+	// the path is machine-local and not persisted, so a task loaded from disk
+	// arrives with it empty. A cleanup failure must not disguise the fact that
+	// the merge itself succeeded, so it is reported as a post-merge note.
+	a.ResolveWorktree(t)
+	if err := a.cleanupTaskWorkspace(t, false); err != nil {
+		return t, fmt.Errorf("merged, but cleanup failed (remove manually): %w", err)
+	}
 	return t, nil
 }

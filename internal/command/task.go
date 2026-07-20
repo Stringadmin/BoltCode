@@ -201,9 +201,10 @@ func (a *App) TaskClaim(taskID, assignee string) (*model.Task, error) {
 	return t, nil
 }
 
-// TaskAbandon marks a task as abandoned and removes its worktree. Proposals
-// and reviews for the task are preserved for audit, and the git branch (with
-// history) is kept so work isn't lost — only the worktree checkout is cleaned up.
+// TaskAbandon marks a task as abandoned and cleans up its workspace: the
+// worktree checkout is removed and the boltcode-owned branch is deleted —
+// abandon means discard (the reflog keeps the commits recoverable for a grace
+// period). Proposals and reviews for the task are preserved for audit.
 func (a *App) TaskAbandon(taskID string) (*model.Task, error) {
 	if err := a.Store.Lock(); err != nil {
 		return nil, err
@@ -221,12 +222,17 @@ func (a *App) TaskAbandon(taskID string) (*model.Task, error) {
 	}
 	t.Status = model.TaskAbandoned
 	t.UpdatedAt = time.Now()
-	// Remove the worktree so we don't accumulate stale checkouts.
-	if t.Worktree != "" {
-		_ = a.Repo.RemoveWorktree(t.Worktree, true)
-	}
 	if err := a.Store.SaveTask(t); err != nil {
 		return nil, err
+	}
+	// ResolveWorktree is mandatory here: the path is machine-local and not
+	// persisted, so a task loaded from disk arrives with it empty — previously
+	// the removal below was silently skipped for every such task, which is why
+	// stale worktrees accumulated. The task is already recorded as abandoned,
+	// so a cleanup failure is reported, not treated as abandonment failure.
+	a.ResolveWorktree(t)
+	if err := a.cleanupTaskWorkspace(t, true); err != nil {
+		return t, fmt.Errorf("abandoned, but cleanup failed (remove manually): %w", err)
 	}
 	return t, nil
 }
@@ -251,4 +257,28 @@ func (a *App) ResolveWorktree(t *model.Task) {
 	if t.Worktree == "" && t.Branch != "" {
 		t.Worktree = filepath.Join(a.Repo.WorktreeBase(), t.Branch)
 	}
+}
+
+// cleanupTaskWorkspace removes a finished task's worktree checkout and its
+// boltcode-owned branch, neither of which has any purpose once the task is
+// merged or abandoned. The worktree goes first — a branch cannot be deleted
+// while a worktree still has it checked out. force selects the branch-delete
+// mode: false after a merge (git verifies the branch is merged, so -d doubles
+// as a safety check), true for abandon (unmerged work is discarded by intent;
+// the reflog keeps the commits recoverable for a grace period).
+//
+// Callers must ResolveWorktree first: the worktree path is machine-local and
+// never persisted, so a task freshly loaded from disk arrives with it empty.
+func (a *App) cleanupTaskWorkspace(t *model.Task, force bool) error {
+	if t.Worktree != "" {
+		if err := a.Repo.RemoveWorktree(t.Worktree, true); err != nil {
+			return fmt.Errorf("worktree %s: %w", t.Worktree, err)
+		}
+	}
+	if t.Branch != "" && a.Repo.BranchExists(t.Branch) {
+		if err := a.Repo.DeleteBranch(t.Branch, force); err != nil {
+			return fmt.Errorf("branch %s: %w", t.Branch, err)
+		}
+	}
+	return nil
 }

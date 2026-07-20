@@ -94,25 +94,48 @@ boltcode          # 进入交互式 shell
 > config          # 管理服务商、API Key 和模型档案
 ```
 
-`config` 支持**多服务商档案**：你可以保存多份配置（如 `anthropic` / `火山方舟` / `local`），每份含独立的 provider、API Key、模型、base_url。向导里：
+`config` 支持**多服务商档案**：你可以保存多份配置（如 `anthropic` / `火山方舟` / `local`），每份含独立的 provider、API Key、模型、base_url、上下文窗口和思考强度。向导里：
 
 - 已有档案、服务商和内置模型均可按编号选择，也可以直接输入自定义 provider / 模型 ID
 - 切换服务商时会自动带出推荐模型与默认 Base URL；输入 `-` 可恢复服务商默认地址
 - API Key 使用隐藏输入，不会显示在终端或写入命令历史
-- 每个字段可回车保留 / `b` 返回上一步 / `q` 取消；确认页可按 `1`–`4` 直接返回对应字段
+- 思考强度支持 `auto` / `low` / `medium` / `high`；Anthropic 映射为 thinking token budget，OpenAI 兼容接口映射为 `reasoning_effort`
+- Base URL 包含 `/codex/` 或以 `/responses` 结尾时自动使用原生 Responses API，工具结果按 `function_call_output` 回传；其他 OpenAI 兼容地址继续使用 Chat Completions
+- 每个字段可回车保留 / `b` 返回上一步 / `q` 取消；确认页可按 `1`–`6` 直接返回对应字段
 - 保存的档案自动设为当前
 
 > 也可以复用 Claude Code 的配置：若 `~/.boltcode/agent.json` 不存在，BoltCode 会自动读 `~/.claude/settings.json` 里的 `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`。零额外配置即可用。
+
+#### 无头环境（CI / 脚本）：环境变量配置
+
+无法交互时（CI、管道、远程脚本），直接用环境变量提供 Key，无需 `config` 向导。优先级：**已保存档案 > 环境变量 > Claude Code settings**。
+
+| 变量 | 作用 |
+|------|------|
+| `BOLTCODE_API_KEY` | 通用 API Key（provider 由 `BOLTCODE_PROVIDER` 指定，默认 `anthropic`） |
+| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | Anthropic Key |
+| `OPENAI_API_KEY` | OpenAI Key |
+| `ARK_API_KEY` / `VOLC_API_KEY` | 火山方舟 Key |
+| `BOLTCODE_PROVIDER` | provider id（`anthropic` / `openai` / `volc` / `deepseek` / `moonshot` / `qwen` / `custom`） |
+| `BOLTCODE_MODEL` | 模型 id（可选） |
+| `BOLTCODE_BASE_URL` | 自定义端点（可选，缺省用 provider 的官方地址） |
+| `BOLTCODE_CONTEXT_WINDOW` | 上下文窗口大小（可选，正整数） |
+| `BOLTCODE_REASONING_EFFORT` | 思考强度 `auto` / `low` / `medium` / `high`（可选） |
+
+```bash
+export BOLTCODE_API_KEY=sk-... BOLTCODE_PROVIDER=deepseek BOLTCODE_MODEL=deepseek-chat
+boltcode        # 进入会话后直接 run，无需 config
+```
 
 #### 切换服务商 / 模型
 
 Agent 会话中：
 
 ```
-> /profile              # 列出所有档案，标记当前
-> /profile 火山方舟      # 切换到该档案（key+model+base_url 一起切，立即生效）
-> /model                # 查看当前模型
-> /model glm-5.2        # 只切模型（持久化到当前档案）
+> /profile              # 交互式选择器：按编号切换档案，或新建档案
+> /profile 火山方舟      # 直接按名切换（key+model+base_url 一起切，立即生效）
+> /model                # 交互式选择器切换模型
+> /model glm-5.2        # 直接切模型（持久化到当前档案）
 ```
 
 ### 3. 启动 Agent 编程
@@ -156,17 +179,29 @@ boltcode --resume            # 不带 id：列出最近会话，交互选择
 
 ### 内置工具
 
+Agent 共有 17 个内置工具（文件类工具的路径都被限制在 worktree 内，防穿越）：
+
 | 工具 | 作用 |
 |------|------|
-| `read_file` | 读文件（路径限制在 worktree 内，防穿越） |
+| `read_file` | 读文件（支持 offset/limit 分页读大文件） |
 | `write_file` | 创建/覆盖文件 |
-| `edit_file` | 精确替换（`old_string` 必须唯一） |
+| `edit_file` | 精确替换（要求 `old_string` 唯一，否则报错让 Agent 补上下文） |
 | `multi_edit` | 对同一文件应用多处编辑（原子：全成或全不成） |
-| `search_code` | 正则搜索代码 |
-| `run_command` | 执行 shell 命令（需确认） |
-| `list_files` | 列目录 |
+| `delete_file` | 删除文件或空目录（不会删非空目录） |
+| `rename_file` | 重命名/移动文件或目录（自动建目标父目录） |
+| `search_code` | 正则搜索代码（grep 语义，支持 glob 过滤） |
+| `glob` | 按文件名模式找文件（支持 `**` 递归） |
+| `list_files` | 列目录（跳过 .git/node_modules） |
+| `run_command` | 执行 shell 命令（需确认；构建/测试/装依赖） |
+| `web_fetch` | 抓取 URL 文本内容（查文档/API 说明） |
+| `git_status` | 查看工作区状态（提交前自查） |
+| `git_diff` | 查看未提交改动 diff |
+| `git_commit` | 暂存全部改动并提交（完成一个逻辑单元后保存进度） |
+| `get_diagnostics` | 跑诊断/lint 命令（`go vet`、`tsc --noEmit` 等，改完验证正确性） |
 | `todo_write` | 创建/更新任务计划（长任务拆步骤，防迷失） |
 | `update_memory` | 持久化项目知识到跨会话记忆 |
+
+> 注意：工具表里没有 merge/push——合并与推送只存在于人类命令侧，这是代码级保证（见"设计原理"）。
 
 ### 上下文管理
 
@@ -205,18 +240,6 @@ Agent 完成后，若有未提交改动，会询问是否提交：
 
 直接回车用默认提交信息，或输入自定义信息，或 `n` 跳过。
 
-### Agent 的内置工具
-
-| 工具 | 作用 |
-|------|------|
-| `read_file` | 读文件（路径限制在 worktree 内，防穿越） |
-| `write_file` | 创建/覆盖文件 |
-| `edit_file` | 精确替换（要求 `old_string` 唯一，否则报错让 Agent 补上下文） |
-| `search_code` | 正则搜索代码（grep 语义） |
-| `run_command` | 执行 shell 命令（需确认） |
-| `list_files` | 列目录（跳过 .git/node_modules） |
-| `update_memory` | 持久化项目知识到跨会话记忆 |
-
 ---
 
 ## 斜杠命令
@@ -225,21 +248,36 @@ Agent 会话中可输入 `/` 命令：
 
 | 命令 | 作用 |
 |------|------|
+| `/` | 单独输入：弹出命令选择器 |
 | `/help` | 显示所有斜杠命令 |
-| `/tokens` | 显示 token 用量 |
+| `/tokens`（别名 `/usage`） | 显示 token 用量 |
 | `/time` | 显示会话耗时 |
-| `/model` | 查看当前模型 |
-| `/model <id>` | 切换模型（持久化到当前档案） |
-| `/profile` | 列出所有服务商档案 |
-| `/profile <name>` | 切换激活的档案 |
+| `/mode` | 查看当前交互模式 |
+| `/mode <build\|plan\|ask>` | 切换交互模式（见下表） |
+| `/model` | 交互式选择器切换模型 |
+| `/model <id>` | 直接切换模型（持久化到当前档案） |
+| `/profile` | 交互式选择器：按编号切换或新建服务商档案 |
+| `/profile <name>` | 直接按名切换档案 |
 | `/diff` | 查看 worktree 未提交改动 |
+| `/undo` | 撤销最近一次 write/edit/delete/rename 工具改动（checkpoint 恢复） |
 | `/files` | 列出 worktree 文件 |
 | `/clear` | 清空对话历史（保留初始上下文） |
 | `/compact` | 压缩上下文（LLM 摘要旧消息） |
 | `/context` | 查看上下文用量进度条 |
+| `/retry` | 重试上一次失败的 API 请求（仅在请求刚失败后的恢复提示下有效） |
+| `/restrict` | 撤销 `a`（AutoAllow），恢复每条命令逐一确认 |
 | `/triage [worktree\|repo]` | 让 AI 审查代码库，给出优先处理项 |
 | `/sessions` | 列出历史会话（用 `boltcode --resume <id>` 恢复） |
+| `/sessions delete <id>` | 删除指定历史会话 |
 | `exit` / `done` / `quit` | 结束会话 |
+
+### 交互模式（`/mode`）
+
+| 模式 | 行为 |
+|------|------|
+| `build`（默认） | 完整能力：编辑文件、执行命令、实现改动 |
+| `plan` | 只调研和设计，给出方案，不改动项目 |
+| `ask` | 只回答问题和查看代码，不出方案、不改项目 |
 
 ---
 
@@ -307,12 +345,13 @@ boltcode reject p_xxxx "密码强度校验缺失，补上"
 |------|------|
 | `task new <intent>` | 创建任务 + 隔离 worktree |
 | `task ls` | 列出所有任务 |
-| `task claim <id>` | 认领任务（防重复工作） |
+| `task claim <id> [--as <name>]` | 认领任务（防重复工作） |
+| `task abandon <id>` | 放弃任务（清理 worktree 与分支，元数据保留） |
 | `submit <task> <summary>` | 提交工作为提案 |
 | `review` | 列出待审查提案 |
 | `diff <proposal>` | 看提案 diff |
 | `approve <proposal>` | 批准（不合并） |
-| `merge <proposal>` | 批准 + 合并 |
+| `merge <proposal>` | 批准 + 合并（自动清理任务 worktree 与分支） |
 | `reject <proposal> <note>` | 退回并附注 |
 | `status` | 团队仪表板 |
 | `sync` | 提交 + push/pull 元数据与团队同步 |
@@ -324,7 +363,8 @@ boltcode task new "重构认证模块" \
   --base develop \           # 从哪个分支 fork（默认当前分支）
   --depends t_xxx,t_yyy \    # 依赖哪些任务先完成
   --priority 2 \             # 优先级（数字大更紧急）
-  --tags backend,auth        # 标签
+  --tags backend,auth \      # 标签
+  --agent builtin            # 执行者（默认内置 Agent）
 ```
 
 ### 任务依赖
@@ -439,8 +479,9 @@ boltcode remote setup | show
 boltcode push [--force] | pull
 boltcode spec init | show | edit
 boltcode tui                          # 交互式审查界面
+boltcode completion bash|zsh|fish     # 生成 shell 补全脚本
 # team 模式下还可：
-boltcode task new|ls|claim ...
+boltcode task new|ls|claim|abandon ...
 boltcode submit <task> <summary>
 boltcode review | diff <proposal>
 boltcode approve|merge|reject <proposal>
@@ -455,6 +496,7 @@ boltcode status | sync
 | `--depends <ids>` | 依赖的任务 id（逗号分隔） | 无 |
 | `--priority N` | 优先级 | 0 |
 | `--tags a,b` | 标签 | 无 |
+| `--agent <name>` | 执行者标识 | `builtin` |
 
 > `run`、`config` 和所有斜杠命令只在交互式会话内可用，不是 CLI 子命令。
 

@@ -89,6 +89,7 @@ resume a saved conversation (sessions auto-save when an agent session ends):
 
 one-off CLI subcommands (non-interactive):
   boltcode init
+  boltcode dataset import-opencode --project <dir> --output <file>
   boltcode team init [team-name]
   boltcode remote add <url>      url: git@github.com:user/repo.git |
                                         https://github.com/user/repo.git |

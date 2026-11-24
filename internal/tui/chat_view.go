@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -10,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Stringadmin/BoltCode/internal/theme"
+	"github.com/Stringadmin/BoltCode/internal/agent"
 )
 
 // layout sizes the viewport and textarea to the current terminal dimensions.
@@ -21,7 +20,8 @@ func (m *ChatModel) layout() {
 	inputH := chatInputRows + 2
 	headerH := 1
 	statusH := 2
-	vpH := m.height - inputH - statusH - headerH - chatConversationGapRows
+	activityH := 1 // reserved spinner/activity row, so busy transitions never resize the viewport
+	vpH := m.height - inputH - statusH - headerH - activityH - chatConversationGapRows
 	if vpH < 3 {
 		vpH = 3
 	}
@@ -34,42 +34,59 @@ func (m *ChatModel) layout() {
 		m.viewport.Width = m.width
 		m.viewport.Height = vpH
 	}
-	m.textarea.SetWidth(m.width - 2)
+	m.textarea.SetWidth(max(1, m.width-2))
+	// Timeline and plan rendering depend on the width; rebuild their caches.
+	m.timelineDirty = true
+	m.planDirty = true
 	m.refreshViewport()
 }
 
-// refreshViewport re-renders the message log into the viewport, word-wrapping
-// to the current width.
+// refreshViewport re-renders changed parts of the message log into the
+// viewport, word-wrapping to the current width. Appended lines are wrapped
+// incrementally; a resize or a cleared log triggers a full re-wrap.
 func (m *ChatModel) refreshViewport() {
 	if !m.ready {
 		return
 	}
 	wrapWidth := m.width - 3
-	if m.logDirty || m.renderWidth != wrapWidth {
-		m.renderedLog = wrapChatContent(strings.Join(m.lines, "\n"), wrapWidth)
+	if m.renderWidth != wrapWidth || len(m.wrappedLines) > len(m.lines) {
+		m.wrappedLines = make([]string, len(m.lines))
+		for i, line := range m.lines {
+			m.wrappedLines[i] = wrapChatLine(line, wrapWidth)
+		}
 		m.renderWidth = wrapWidth
-		m.logDirty = false
+	} else {
+		for i := len(m.wrappedLines); i < len(m.lines); i++ {
+			m.wrappedLines = append(m.wrappedLines, wrapChatLine(m.lines[i], wrapWidth))
+		}
 	}
-	content := m.renderedLog
-	if timeline := m.renderToolTimeline(); timeline != "" {
+	content := strings.Join(m.wrappedLines, "\n")
+	if m.timelineDirty {
+		m.timelineCache = m.renderToolTimeline()
+		m.timelineDirty = false
+	}
+	if m.planDirty {
+		m.planCache = m.renderPlanPanel()
+		m.planDirty = false
+	}
+	if m.timelineCache != "" {
 		if content != "" {
 			content += "\n\n"
 		}
-		content += timeline
+		content += m.timelineCache
 	}
-	if plan := m.renderPlanPanel(); plan != "" {
+	if m.planCache != "" {
 		if content != "" {
 			content += "\n\n"
 		}
-		content += plan
+		content += m.planCache
 	}
-	if m.busy && !m.finished {
-		if content != "" {
-			content += "\n\n"
-		}
-		content += m.renderActivityLine()
+	// SetContent re-splits and measures every line, so skip it when nothing
+	// actually changed.
+	if content != m.viewportContent {
+		m.viewport.SetContent(content)
+		m.viewportContent = content
 	}
-	m.viewport.SetContent(content)
 }
 
 func (m *ChatModel) renderActivityLine() string {
@@ -89,27 +106,40 @@ func (m *ChatModel) renderActivityLine() string {
 	return line + chatDimStyle.Render(" · "+elapsed.String())
 }
 
+// wrapChatLine renders one log line at the given width, preserving leading
+// indentation across wrapped segments. The result may contain newlines.
+func wrapChatLine(line string, width int) string {
+	if width < 20 || ansi.StringWidth(line) <= width {
+		return line
+	}
+	indent := len(line) - len(strings.TrimLeft(line, " "))
+	bodyWidth := width - indent
+	if bodyWidth < 1 {
+		bodyWidth = width
+	}
+	wrapped := strings.Split(ansi.WrapWc(strings.TrimLeft(line, " "), bodyWidth, "/\\"), "\n")
+	for i, part := range wrapped {
+		wrapped[i] = strings.Repeat(" ", indent) + strings.TrimLeft(part, " ")
+	}
+	return strings.Join(wrapped, "\n")
+}
+
+// wrapChatContent wraps a whole multi-line block. Kept for tests and one-off
+// rendering; the chat hot path wraps lines incrementally via wrapChatLine.
 func wrapChatContent(content string, width int) string {
-	if width < 20 {
-		return content
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		lines[i] = wrapChatLine(line, width)
 	}
-	var out []string
-	for _, line := range strings.Split(content, "\n") {
-		if ansi.StringWidth(line) <= width {
-			out = append(out, line)
-			continue
-		}
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		bodyWidth := width - indent
-		if bodyWidth < 1 {
-			bodyWidth = width
-		}
-		wrapped := strings.Split(ansi.WrapWc(strings.TrimLeft(line, " "), bodyWidth, "/\\"), "\n")
-		for _, part := range wrapped {
-			out = append(out, strings.Repeat(" ", indent)+strings.TrimLeft(part, " "))
-		}
+	return strings.Join(lines, "\n")
+}
+
+// appendLogBlank starts a new visual block in the log unless the log already
+// ends with a blank line. Shared by the popup selection side effects.
+func (m *ChatModel) appendLogBlank() {
+	if len(m.lines) > 0 && m.lines[len(m.lines)-1] != "" {
+		m.lines = append(m.lines, "")
 	}
-	return strings.Join(out, "\n")
 }
 
 func activityFromAgentLine(line string) string {
@@ -147,6 +177,7 @@ func (m *ChatModel) View() string {
 	base := lipgloss.JoinVertical(lipgloss.Left,
 		m.renderSessionHeader(),
 		m.renderConversationViewport(),
+		m.renderActivityRow(),
 		strings.Repeat(" ", max(0, m.width)),
 		m.renderStatusBar(),
 		m.renderInputBox(),
@@ -157,41 +188,66 @@ func (m *ChatModel) View() string {
 	return base
 }
 
+// renderActivityRow is the single-row spinner/activity line between the
+// conversation and the status bar. It lives outside the viewport so spinner
+// ticks re-render one row instead of re-splitting the whole message log.
+// The row is always occupied (blank while idle) so the layout never jumps.
+func (m *ChatModel) renderActivityRow() string {
+	if !m.busy || m.finished {
+		return ""
+	}
+	return m.renderActivityLine()
+}
+
 func (m *ChatModel) renderSessionHeader() string {
 	state := "ready"
-	if m.failed {
-		state = "failed"
-	} else if m.finished {
-		state = "stopped"
-	} else if m.recovering {
-		state = "recovery"
-	} else if m.busy {
-		state = "working"
-	}
-	workspace := filepath.Base(filepath.Clean(m.agent.Workdir))
-	if workspace == "" || workspace == "." {
-		workspace = "workspace"
+	stateStyle := chatGreenStyle
+	switch {
+	case m.failed:
+		state, stateStyle = "failed", chatErrorStyle
+	case m.finished:
+		state, stateStyle = "stopped", chatDimStyle
+	case m.recovering:
+		state, stateStyle = "recovery", chatErrorStyle
+	case m.busy:
+		state, stateStyle = "working", chatPromptStyle
 	}
 	scroll := 100
 	if m.ready && !m.viewport.AtBottom() {
 		scroll = int(m.viewport.ScrollPercent() * 100)
 	}
-	content := fmt.Sprintf(" ⚡ BoltCode  ·  %s  ·  %s  ·  %s  ·  %s  ·  ↕ %d%% ", workspace, m.model, m.mode, state, scroll)
+	sep := chatDimStyle.Render(" · ")
+	content := chatTitleStyle.Render(" ⚡ BoltCode") + sep +
+		chatBrightStyle.Render(m.workspace) + sep +
+		chatAccentStyle.Render(m.model) + sep +
+		modeBadge(m.mode) + sep +
+		stateStyle.Render(state) + sep +
+		chatDimStyle.Render(fmt.Sprintf("↕ %d%%", scroll)) + " "
 	if ansi.StringWidth(content) > m.width {
 		content = ansi.Truncate(content, m.width, "…")
 	}
 	return chatHeaderStyle.Width(m.width).Render(content)
 }
 
+// modeBadge renders the agent mode as an uppercase, color-coded segment.
+func modeBadge(mode agent.Mode) string {
+	style := chatGreenStyle
+	switch mode {
+	case agent.ModePlan:
+		style = chatWarnStyle
+	case agent.ModeAsk:
+		style = chatBlueStyle
+	}
+	return style.Render(strings.ToUpper(string(mode)))
+}
+
 func (m *ChatModel) renderInputBox() string {
-	style := inputBoxStyle
+	style := inputBoxReadyStyle
 	switch {
 	case m.failed || m.recovering:
-		style = style.BorderForeground(lipgloss.Color(theme.ColorDanger))
+		style = inputBoxErrorStyle
 	case m.busy:
-		style = style.BorderForeground(lipgloss.Color(theme.ColorPrimary))
-	default:
-		style = style.BorderForeground(lipgloss.Color(theme.ColorSuccess))
+		style = inputBoxBusyStyle
 	}
 	return style.Render(m.textarea.View())
 }

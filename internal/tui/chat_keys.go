@@ -43,6 +43,7 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.toolsExpanded = !m.toolsExpanded
+		m.timelineDirty = true
 		if m.toolsExpanded {
 			m.statusHint = "tool details expanded"
 		} else {
@@ -71,34 +72,62 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		// Some Windows terminals emit Enter immediately after an IME commits
-		// candidate text. Consume that Enter once so choosing “你好” does not
-		// accidentally submit the whole chat message.
-		if !m.imeCommitAt.IsZero() && time.Since(m.imeCommitAt) < 250*time.Millisecond {
-			m.imeCommitAt = time.Time{}
-			m.statusHint = "IME text committed — press Enter again to send"
-			return m, nil
-		}
 		if m.finished {
+			m.imeCommitAt = time.Time{}
 			m.statusHint = "session ended"
 			return m, nil
 		}
 		if m.busy {
+			m.imeCommitAt = time.Time{}
 			m.statusHint = "draft held — wait for the current reply"
+			return m, nil
+		}
+		// Some Windows terminals emit Enter immediately after an IME commits
+		// candidate text. Consume that Enter once so choosing “你好” does not
+		// accidentally submit the whole chat message. Checked after the
+		// finished/busy guards so those hints win when they apply.
+		if !m.imeCommitAt.IsZero() && time.Since(m.imeCommitAt) < 250*time.Millisecond {
+			m.imeCommitAt = time.Time{}
+			m.statusHint = "IME text committed — press Enter again to send"
 			return m, nil
 		}
 		if strings.HasPrefix(text, "/") {
 			return m.handleSlashCommand(text)
 		}
 		m.sendUserMessage(text, true)
-		return m, nil
+		return m, m.kickBusyTicks()
 
 	case tea.KeyPgUp:
-		m.viewport.HalfViewUp()
+		m.viewport.ViewUp()
 		return m, nil
 	case tea.KeyPgDown:
-		m.viewport.HalfViewDown()
+		m.viewport.ViewDown()
 		return m, nil
+
+	case tea.KeyHome, tea.KeyEnd:
+		if m.textarea.Value() != "" {
+			// While typing, Home/End belong to the editor.
+			return m, m.updateTextarea(msg)
+		}
+		if msg.Type == tea.KeyHome {
+			m.viewport.GotoTop()
+		} else {
+			m.viewport.GotoBottom()
+		}
+		return m, nil
+
+	case tea.KeyUp:
+		if m.textarea.Line() == 0 && len(m.promptHistory) > 0 {
+			m.recallPrompt(-1)
+			return m, nil
+		}
+		return m, m.updateTextarea(msg)
+	case tea.KeyDown:
+		if m.historyIndex < len(m.promptHistory) {
+			m.recallPrompt(1)
+			return m, nil
+		}
+		return m, m.updateTextarea(msg)
 
 	default:
 		if msg.Type == tea.KeyRunes && !msg.Paste && containsNonASCII(msg.Runes) {
@@ -106,8 +135,7 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.imeCommitAt = time.Time{}
 		}
-		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg)
+		cmd := m.updateTextarea(msg)
 		val := m.textarea.Value()
 		if val == "/" {
 			return m.showCommandPopup()
@@ -117,6 +145,41 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
+}
+
+// updateTextarea forwards an editing key to the textarea and returns its
+// command. Shared by the editing branches so navigation keys can fall back to
+// text editing without duplicating the call.
+func (m *ChatModel) updateTextarea(msg tea.KeyMsg) tea.Cmd {
+	var cmd tea.Cmd
+	m.textarea, cmd = m.textarea.Update(msg)
+	return cmd
+}
+
+// recallPrompt walks the prompt history (direction -1 = older, +1 = newer).
+// The in-progress draft is saved on entry and restored past the newest entry.
+func (m *ChatModel) recallPrompt(direction int) {
+	if len(m.promptHistory) == 0 {
+		return
+	}
+	if m.historyIndex >= len(m.promptHistory) {
+		if direction > 0 {
+			return // already at the newest entry
+		}
+		m.historyDraft = m.textarea.Value()
+		m.historyIndex = len(m.promptHistory)
+	}
+	m.historyIndex += direction
+	if m.historyIndex < 0 {
+		m.historyIndex = 0
+	}
+	if m.historyIndex >= len(m.promptHistory) {
+		m.historyIndex = len(m.promptHistory)
+		m.textarea.SetValue(m.historyDraft)
+		return
+	}
+	m.textarea.SetValue(m.promptHistory[m.historyIndex])
+	m.textarea.CursorEnd()
 }
 
 func containsNonASCII(runes []rune) bool {
@@ -147,11 +210,30 @@ func (m *ChatModel) handleSlashCommand(text string) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	case "/clear":
+		// Forward to the agent so its conversation history is cleared too —
+		// clearing only the viewport left the model receiving (and billing)
+		// the full history. The agent's confirmation line arrives afterwards
+		// on the fresh screen.
+		if m.finished {
+			m.statusHint = "session ended"
+			m.textarea.Reset()
+			return m, nil
+		}
+		if m.busy {
+			m.statusHint = "wait for the current reply, then /clear"
+			m.textarea.Reset()
+			return m, nil
+		}
+		if !m.sendUserMessage(text, false) {
+			m.textarea.Reset()
+			return m, nil
+		}
 		m.lines = nil
-		m.logDirty = true
+		m.toolTimeline = nil
+		m.timelineDirty = true
+		m.setPlanItems(nil)
 		m.refreshViewport()
-		m.textarea.Reset()
-		return m, nil
+		return m, m.kickBusyTicks()
 	case "/retry":
 		if !m.recovering {
 			m.statusHint = "nothing to retry"
@@ -161,7 +243,7 @@ func (m *ChatModel) handleSlashCommand(text string) (tea.Model, tea.Cmd) {
 		return m.retryLastRequest()
 	default:
 		m.sendUserMessage(text, false)
-		return m, nil
+		return m, m.kickBusyTicks()
 	}
 }
 
@@ -176,11 +258,10 @@ func (m *ChatModel) retryLastRequest() (tea.Model, tea.Cmd) {
 		m.busySince = time.Now()
 		m.textarea.Placeholder = chatBusyPlaceholder
 		m.lines = append(m.lines, "", chatPromptStyle.Render("  ↻ retrying last request"))
-		m.logDirty = true
 		m.refreshViewport()
 		m.viewport.GotoBottom()
 		m.textarea.Reset()
-		return m, nil
+		return m, m.kickBusyTicks()
 	default:
 		m.statusHint = "retry channel is not ready"
 		return m, nil
@@ -206,17 +287,24 @@ func (m *ChatModel) sendUserMessage(text string, leadingBlank bool) bool {
 		m.lastToolError = false
 		m.busySince = time.Now()
 		m.textarea.Placeholder = chatBusyPlaceholder
-		m.lines = append(m.lines, chatUserStyle.Render("  ◆ you"))
-		for _, line := range strings.Split(text, "\n") {
-			m.lines = append(m.lines, "    "+line)
+		m.lines = append(m.lines, userMessageLines(text)...)
+		// Prompt history for ↑/↓ recall, capped so a long session does not
+		// grow it without bound.
+		if len(m.promptHistory) == 0 || m.promptHistory[len(m.promptHistory)-1] != text {
+			m.promptHistory = append(m.promptHistory, text)
+			if len(m.promptHistory) > 100 {
+				m.promptHistory = append([]string(nil), m.promptHistory[len(m.promptHistory)-100:]...)
+			}
 		}
-		m.logDirty = true
+		m.historyIndex = len(m.promptHistory)
+		m.historyDraft = ""
 		m.refreshViewport()
 		m.viewport.GotoBottom()
 		m.textarea.Reset()
 		return true
 	default:
-		m.busy = true
+		// Nothing was sent, so the agent is not working on this message —
+		// setting busy here would wedge the UI in a permanent working state.
 		m.statusHint = "draft held — input channel is not ready"
 		return false
 	}

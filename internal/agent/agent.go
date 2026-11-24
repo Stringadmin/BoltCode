@@ -52,15 +52,23 @@ func (p Profile) ToConfig() Config {
 
 // Agent is the built-in AI coding engine.
 type Agent struct {
-	Config    Config
-	Mode      Mode   // build (default) | plan | ask
-	Workdir   string // the task worktree (or repo root in solo mode)
-	RepoRoot  string // the main repository root — the /triage repo scope
-	Intent    string // what the user wants done
-	Messages  []Message
-	Stats     *Stats
-	AutoAllow bool                  // session-level "allow all commands" flag
-	ConfirmFn func(cmd string) bool // ask user before running commands
+	// ProjectGuidance is repository text supplied by the desktop for this turn.
+	ProjectGuidance string
+	// WorkspaceMemory contains evidence checked by the desktop at the start of this turn.
+	WorkspaceMemory    string
+	ToolLessons        []ToolLesson
+	LearnedToolLessons []ToolLesson
+	toolRepairAttempts map[string]toolRepairAttempt
+	// ExecEnv embeds the execution-side dependencies (Workdir, AutoAllow,
+	// ConfirmFn, Runner, FS). Reads keep working via promotion.
+	ExecEnv
+	Config     Config
+	Mode       Mode   // build (default) | plan | ask
+	RepoRoot   string // the main repository root — the /triage repo scope
+	MemoryFile string // optional per-session memory location outside the worktree
+	Intent     string // what the user wants done
+	Messages   []Message
+	Stats      *Stats
 	// InputFn reads a line of user input. Set by Run so slash commands that
 	// need follow-up input (like /profile's interactive picker) can read it.
 	InputFn func() string
@@ -104,12 +112,13 @@ type Agent struct {
 	// stdout rendering.
 	EventFn func(Event)
 
-	runtimeMu     sync.Mutex
-	sessionCtx    context.Context
-	sessionCancel context.CancelFunc
-	cancelFn      context.CancelFunc
-	interrupted   bool
-	undoStack     []changeCheckpoint
+	structuredTurn bool // RunTurn streams plain text through EventFn instead of stdout
+	runtimeMu      sync.Mutex
+	sessionCtx     context.Context
+	sessionCancel  context.CancelFunc
+	cancelFn       context.CancelFunc
+	interrupted    bool
+	undoStack      []changeCheckpoint
 }
 
 // CancelRequest interrupts the currently active API request or long-running
@@ -151,9 +160,13 @@ func (a *Agent) Done() <-chan struct{} {
 }
 
 func (a *Agent) beginSession() context.Context {
+	return a.beginSessionWithContext(context.Background())
+}
+
+func (a *Agent) beginSessionWithContext(parent context.Context) context.Context {
 	a.runtimeMu.Lock()
 	defer a.runtimeMu.Unlock()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	a.sessionCtx = ctx
 	a.sessionCancel = cancel
 	a.cancelFn = nil
@@ -209,15 +222,17 @@ type TodoItem struct {
 
 // Message represents a conversation message.
 type Message struct {
-	Role    string      `json:"role"`
-	Content interface{} `json:"content"`
+	Role      string           `json:"role"`
+	Content   interface{}      `json:"content"`
+	Reasoning *reasoningReplay `json:"reasoning,omitempty"`
 }
 
 // ToolCall represents a tool the AI wants to use.
 type ToolCall struct {
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Input        json.RawMessage `json:"input"`
+	invalidInput bool
 }
 
 // ToolResult is what we send back after executing a tool.
@@ -225,6 +240,7 @@ type ToolResult struct {
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 	IsError   bool   `json:"is_error,omitempty"`
+	lesson    ToolLesson
 	// Diff carries a compact before→after preview for edit operations. It is
 	// NOT sent to the AI (json:"-"); it's only used by printToolResult to give
 	// the user immediate visual feedback of what changed.

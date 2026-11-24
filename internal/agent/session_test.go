@@ -35,7 +35,7 @@ func TestSaveAndLoadSession(t *testing.T) {
 	a := &Agent{
 		Config:   Config{Provider: "deepseek", Model: "deepseek-chat", BaseURL: "https://api.deepseek.com/v1", ContextWindow: 256_000, ReasoningEffort: ReasoningMedium},
 		Mode:     ModePlan,
-		Workdir:  "/some/dir",
+		ExecEnv:  ExecEnv{Workdir: "/some/dir"},
 		RepoRoot: "/some",
 		Intent:   "fix the bug",
 		Messages: []Message{

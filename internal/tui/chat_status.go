@@ -20,19 +20,17 @@ func (m *ChatModel) renderStatusBar() string {
 	} else if m.recovering {
 		left = chatErrorStyle.Render("● recover")
 	} else if m.busy {
-		activity := m.activity
-		if activity == "" {
-			activity = "Thinking"
-		}
-		left = m.spinner.View() + " " + chatPromptStyle.Render(activity)
-		if m.activityDetail != "" {
-			left += chatDimStyle.Render(" · " + m.activityDetail)
-		}
+		// The spinner and activity detail live on the activity row above; the
+		// status bar only carries the state dot.
+		left = chatPromptStyle.Render("● working")
 	} else {
 		left = chatGreenStyle.Render("● ready")
 	}
 	if m.statusHint != "" {
 		left += chatDimStyle.Render(" · " + m.statusHint)
+	}
+	if m.newBelow {
+		left += chatPromptStyle.Render(" · ↓ new messages")
 	}
 	permission := "confirm"
 	if m.mode != agent.ModeBuild {
@@ -40,15 +38,13 @@ func (m *ChatModel) renderStatusBar() string {
 	} else if m.agent.AutoAllow {
 		permission = "auto-allow"
 	}
-	scroll := 100
-	if m.ready && !m.viewport.AtBottom() {
-		scroll = int(m.viewport.ScrollPercent() * 100)
-	}
-	rightParts := []string{m.model, string(m.mode)}
+	// Model, mode and scroll position are shown once in the session header;
+	// the status bar only adds what the header does not have.
+	var rightParts []string
 	if effort := agent.NormalizeReasoningEffort(m.agent.Config.ReasoningEffort); effort != agent.ReasoningAuto {
 		rightParts = append(rightParts, "think:"+string(effort))
 	}
-	rightParts = append(rightParts, permission, fmt.Sprintf("↕ %d%%", scroll), "Shift+Tab mode", "Ctrl+P sessions")
+	rightParts = append(rightParts, permission, "Shift+Tab mode", "Ctrl+P sessions")
 	right := chatDimStyle.Render(strings.Join(rightParts, " · "))
 	primary := fitStatusLine(left+"  │  "+right, m.width)
 
@@ -57,7 +53,7 @@ func (m *ChatModel) renderStatusBar() string {
 	if window > 0 {
 		contextPct = int(float64(m.contextTokens) / float64(window) * 100)
 	}
-	statusParts := []string{fmt.Sprintf("context %d%% · %s/%s", contextPct, formatMetricTokens(m.contextTokens), formatMetricTokens(window))}
+	statusParts := []string{fmt.Sprintf("context %s %d%% · %s/%s", contextBar(contextPct, 10), contextPct, formatMetricTokens(m.contextTokens), formatMetricTokens(window))}
 	if m.planTotal > 0 {
 		plan := fmt.Sprintf("tasks %d/%d", m.planDone, m.planTotal)
 		if m.planCurrent != "" {
@@ -79,6 +75,30 @@ func (m *ChatModel) renderStatusBar() string {
 		statusBarStyle.Width(m.width).Render(primary),
 		chatDimStyle.Background(lipgloss.Color(theme.ColorDeepSurface)).Width(m.width).Render(secondary),
 	)
+}
+
+// progressBar renders a fixed-cell usage bar: filled cells in the given
+// style, the rest dim.
+func progressBar(pct, cells int, style lipgloss.Style) string {
+	if cells < 1 {
+		cells = 1
+	}
+	pct = max(0, min(100, pct))
+	filled := pct * cells / 100
+	return style.Render(strings.Repeat("█", filled)) + chatDimStyle.Render(strings.Repeat("░", cells-filled))
+}
+
+// contextBar colors the context-usage bar by pressure: green while healthy,
+// yellow as the auto-compact threshold (80%) nears, red at 90%+.
+func contextBar(pct, cells int) string {
+	style := chatGreenStyle
+	switch {
+	case pct >= 90:
+		style = chatErrorStyle
+	case pct >= 70:
+		style = chatWarnStyle
+	}
+	return progressBar(pct, cells, style)
 }
 
 func formatMetricTokens(tokens int) string {

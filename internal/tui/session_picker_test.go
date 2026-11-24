@@ -46,3 +46,39 @@ func TestSessionPickerEnterAndEscape(t *testing.T) {
 		t.Fatal("escape did not cancel picker")
 	}
 }
+
+func TestSessionPickerFilter(t *testing.T) {
+	m := &sessionPickerModel{
+		sessions: []agent.Session{
+			{ID: "aaa", Intent: "fix the login page", Model: "deepseek-chat"},
+			{ID: "bbb", Intent: "refactor storage", Model: "gpt-test"},
+		},
+		width: 80, height: 20,
+	}
+	for _, r := range "stor" {
+		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	visible := m.visibleSessions()
+	if len(visible) != 1 || m.sessions[visible[0]].ID != "bbb" {
+		t.Fatalf("filter \"stor\" visible = %v, want only bbb", visible)
+	}
+
+	// With an active query, "q" is filter text instead of quitting.
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if m.cancelled {
+		t.Fatal("q quit the picker while a filter was active")
+	}
+
+	// Esc first clears the query, then cancels.
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.filter != "" || m.cancelled {
+		t.Fatalf("first esc: filter=%q cancelled=%v, want query cleared", m.filter, m.cancelled)
+	}
+	if len(m.visibleSessions()) != 2 {
+		t.Fatalf("cleared filter visible = %d, want 2", len(m.visibleSessions()))
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if !m.cancelled {
+		t.Fatal("second esc did not cancel the picker")
+	}
+}

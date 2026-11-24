@@ -19,10 +19,7 @@ func renderResumeHistory(messages []agent.Message) []string {
 		lines = append(lines, "")
 		switch message.Role {
 		case "user":
-			lines = append(lines, chatUserStyle.Render("  ◆ you"))
-			for _, line := range strings.Split(text, "\n") {
-				lines = append(lines, "    "+line)
-			}
+			lines = append(lines, userMessageLines(text)...)
 		case "assistant":
 			lines = append(lines, "  "+chatAssistantStyle.Render(" ✦ assistant "), "")
 			lines = append(lines, strings.Split(agent.RenderMarkdownForTUI(text), "\n")...)

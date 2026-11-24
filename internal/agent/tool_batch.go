@@ -62,6 +62,7 @@ func (a *Agent) executeReadToolsParallel(calls []ToolCall) []toolExecution {
 }
 
 func (a *Agent) finishToolExecution(execution toolExecution) (map[string]interface{}, bool) {
+	a.observeToolRepair(execution.call, execution.result)
 	a.printToolResult(execution.call, execution.result, execution.elapsed)
 	finishedEvent := Event{
 		Kind:     EventToolFinished,
@@ -70,6 +71,7 @@ func (a *Agent) finishToolExecution(execution toolExecution) (map[string]interfa
 		ToolName: execution.call.Name,
 		Detail:   execution.started.Detail,
 		Result:   execution.result.Content,
+		Diff:     execution.result.Diff,
 		IsError:  execution.result.IsError,
 		Duration: execution.elapsed,
 	}

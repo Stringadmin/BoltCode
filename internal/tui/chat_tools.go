@@ -16,12 +16,14 @@ type toolTimelineEntry struct {
 	activity string
 	detail   string
 	result   string
+	diff     string // compact before→after preview for edit/write tools
 	running  bool
 	failed   bool
 	duration time.Duration
 }
 
 func (m *ChatModel) recordToolEvent(event agent.Event) {
+	m.timelineDirty = true
 	// todo_write already has a dedicated visual plan panel. Keeping it in the
 	// persistent tool timeline produced a misleading "Plan · task list" row
 	// after the active plan had been retired.
@@ -49,6 +51,7 @@ func (m *ChatModel) recordToolEvent(event agent.Event) {
 			entry.failed = event.IsError
 			entry.duration = event.Duration
 			entry.result = truncateTimelineResult(event.Result, 6000)
+			entry.diff = event.Diff
 			if event.Detail != "" {
 				entry.detail = event.Detail
 			}
@@ -57,25 +60,7 @@ func (m *ChatModel) recordToolEvent(event agent.Event) {
 			}
 		}
 	}
-	if event.PlanItems != nil || event.ToolName == "todo_write" {
-		// Ready and tool events are consumed by independent Bubble Tea commands.
-		// A completed todo_write event can therefore arrive after agentReadyMsg.
-		// Never let that late event resurrect a plan already retired at ready.
-		if !m.busy && planItemsCompleted(event.PlanItems) {
-			m.setPlanItems(nil)
-			if m.agent != nil {
-				m.agent.TodoList = nil
-			}
-		} else {
-			m.setPlanItems(event.PlanItems)
-		}
-	} else if event.PlanTotal > 0 {
-		// Compatibility with callers/tests that only populate the compact plan
-		// counters rather than the structured snapshot.
-		m.planDone = event.PlanDone
-		m.planTotal = event.PlanTotal
-		m.planCurrent = event.PlanCurrent
-	}
+	m.applyPlanEvent(event)
 }
 
 func (m *ChatModel) toolEntryIndex(id string) int {
@@ -117,6 +102,14 @@ func (m *ChatModel) renderToolTimeline() string {
 			line += chatDimStyle.Render(" · " + compactDuration(entry.duration))
 		}
 		lines = append(lines, line)
+		// Edit/write diffs are always visible: a code change matters more than
+		// any other tool output, so it is not hidden behind Ctrl+O. The diff
+		// lines already carry their own +/- colors from the agent.
+		if entry.diff != "" {
+			for _, diffLine := range strings.Split(entry.diff, "\n") {
+				lines = append(lines, "  │     "+diffLine)
+			}
+		}
 		if m.toolsExpanded && strings.TrimSpace(entry.result) != "" {
 			preview := strings.Split(strings.TrimSpace(entry.result), "\n")
 			more := 0

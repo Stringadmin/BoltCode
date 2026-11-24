@@ -154,7 +154,7 @@ func TestPlanEventCarriesIndependentTodoSnapshot(t *testing.T) {
 
 func TestMultiEditAppliesAll(t *testing.T) {
 	dir := t.TempDir()
-	a := &Agent{Workdir: dir}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: dir}}
 	path := filepath.Join(dir, "f.txt")
 	os.WriteFile(path, []byte("foo\nbar\nbaz\n"), 0o644)
 
@@ -174,7 +174,7 @@ func TestMultiEditAppliesAll(t *testing.T) {
 
 func TestMultiEditAbortsOnBadEdit(t *testing.T) {
 	dir := t.TempDir()
-	a := &Agent{Workdir: dir}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: dir}}
 	path := filepath.Join(dir, "f.txt")
 	original := "foo\nbar\n"
 	os.WriteFile(path, []byte(original), 0o644)
@@ -196,7 +196,7 @@ func TestMultiEditAbortsOnBadEdit(t *testing.T) {
 
 func TestMultiEditRejectsAmbiguous(t *testing.T) {
 	dir := t.TempDir()
-	a := &Agent{Workdir: dir}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: dir}}
 	path := filepath.Join(dir, "f.txt")
 	os.WriteFile(path, []byte("dup\ndup\n"), 0o644)
 

@@ -38,12 +38,23 @@ func (m *ChatModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	event := tea.MouseEvent(msg)
 	if event.IsWheel() {
 		m.clearSelection()
-		if m.popup == nil {
-			var cmd tea.Cmd
-			m.viewport, cmd = m.viewport.Update(msg)
-			return m, cmd
+		if m.popup != nil {
+			// Scroll the popup selection instead of the conversation behind it.
+			switch event.Button {
+			case tea.MouseButtonWheelUp:
+				if m.popup.selected > 0 {
+					m.popup.selected--
+				}
+			case tea.MouseButtonWheelDown:
+				if m.popup.selected < len(m.popup.filtered)-1 {
+					m.popup.selected++
+				}
+			}
+			return m, nil
 		}
-		return m, nil
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
 	}
 	if m.popup != nil {
 		return m, nil

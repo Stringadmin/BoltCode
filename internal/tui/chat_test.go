@@ -49,7 +49,7 @@ func TestInitialIntentIsVisibleInsideTUI(t *testing.T) {
 		Intent: "清理 TUI 架构\n补齐交互状态",
 	})
 	view := ansi.Strip(strings.Join(m.lines, "\n"))
-	if !strings.Contains(view, "◆ you\n    清理 TUI 架构\n    补齐交互状态") {
+	if !strings.Contains(view, "◆ you\n  │  清理 TUI 架构\n  │  补齐交互状态") {
 		t.Fatalf("initial intent hierarchy missing:\n%s", view)
 	}
 }
@@ -70,7 +70,7 @@ func TestChatReadyAllowsExactlyOnePrompt(t *testing.T) {
 		t.Fatal("chat should become busy immediately after submit")
 	}
 	joined := ansi.Strip(strings.Join(m.lines, "\n"))
-	if !strings.Contains(joined, "◆ you\n    first") {
+	if !strings.Contains(joined, "◆ you\n  │  first") {
 		t.Fatalf("user message hierarchy missing: %q", joined)
 	}
 	lineCount := len(m.lines)
@@ -131,11 +131,12 @@ func TestAgentReadyClearsCompletedPlanImmediately(t *testing.T) {
 		{Content: "inspect", Status: "completed"},
 		{Content: "implement", Status: "completed"},
 	})
-	m.agent.TodoList = append([]agent.TodoItem(nil), m.planItems...)
 	m.Update(agentReadyMsg{})
 
-	if m.busy || m.planTotal != 0 || len(m.planItems) != 0 || len(m.agent.TodoList) != 0 {
-		t.Fatalf("ready state retained completed plan: busy=%v plan=%+v agent=%+v", m.busy, m.planItems, m.agent.TodoList)
+	// Display state only — the agent retires its own TodoList at the start of
+	// its input loop, the UI must not write into it.
+	if m.busy || m.planTotal != 0 || len(m.planItems) != 0 {
+		t.Fatalf("ready state retained completed plan: busy=%v plan=%+v", m.busy, m.planItems)
 	}
 }
 
@@ -185,8 +186,8 @@ func TestNewChatDoesNotRestoreCompletedPlan(t *testing.T) {
 		TodoList: []agent.TodoItem{{Content: "old task", Status: "completed"}},
 	}
 	m := NewChat(a)
-	if m.planTotal != 0 || len(m.planItems) != 0 || len(a.TodoList) != 0 {
-		t.Fatalf("completed resumed plan was restored: ui=%+v agent=%+v", m.planItems, a.TodoList)
+	if m.planTotal != 0 || len(m.planItems) != 0 {
+		t.Fatalf("completed resumed plan was restored: %+v", m.planItems)
 	}
 }
 
@@ -353,7 +354,7 @@ func TestStatusShowsContextPlanAndShortcutsWithoutCost(t *testing.T) {
 	m.layout()
 	m.Update(statusTickMsg{})
 	status := ansi.Strip(m.renderStatusBar())
-	for _, want := range []string{"context 50%", "32k/1.0k in/out", "tasks 1/2", "implement", "Ctrl+P sessions", "Ctrl+O expand tool results"} {
+	for _, want := range []string{"context", "50% · 32k/64k", "32k/1.0k in/out", "tasks 1/2", "implement", "Ctrl+P sessions", "Ctrl+O expand tool results"} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("status missing %q:\n%s", want, status)
 		}
@@ -407,8 +408,12 @@ func TestModePopupAndShiftTabCycleRespectReadyState(t *testing.T) {
 		t.Fatalf("second mode cycle = %s, want ask", m.mode)
 	}
 	status := ansi.Strip(m.renderStatusBar())
-	if !strings.Contains(status, "ask · read-only") {
+	if !strings.Contains(status, "read-only") {
 		t.Fatalf("read-only mode missing from status:\n%s", status)
+	}
+	m.width = 100
+	if header := ansi.Strip(m.renderSessionHeader()); !strings.Contains(header, "ASK") {
+		t.Fatalf("mode missing from session header:\n%s", header)
 	}
 }
 
@@ -421,7 +426,7 @@ func TestCtrlPSessionPopupFiltersWorkspaceAndPreservesDraft(t *testing.T) {
 
 	current := &agent.Agent{
 		Config:   agent.Config{Model: "deepseek-chat"},
-		Workdir:  workspace,
+		ExecEnv:  agent.ExecEnv{Workdir: workspace},
 		Intent:   "fix the current project",
 		Messages: []agent.Message{{Role: "user", Content: "fix the current project"}, {Role: "assistant", Content: "working on it"}},
 	}
@@ -431,7 +436,7 @@ func TestCtrlPSessionPopupFiltersWorkspaceAndPreservesDraft(t *testing.T) {
 	}
 	other := &agent.Agent{
 		Config:   agent.Config{Model: "gpt-test"},
-		Workdir:  otherWorkspace,
+		ExecEnv:  agent.ExecEnv{Workdir: otherWorkspace},
 		Intent:   "unrelated conversation",
 		Messages: []agent.Message{{Role: "user", Content: "unrelated conversation"}, {Role: "assistant", Content: "other"}},
 	}
@@ -439,12 +444,17 @@ func TestCtrlPSessionPopupFiltersWorkspaceAndPreservesDraft(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewChat(&agent.Agent{Config: agent.Config{Model: "deepseek-chat"}, Workdir: workspace})
+	m := NewChat(&agent.Agent{Config: agent.Config{Model: "deepseek-chat"}, ExecEnv: agent.ExecEnv{Workdir: workspace}})
 	m.textarea.SetValue("unfinished draft")
-	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlP})
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlP})
 	if m.popup == nil || m.popup.kind != "sessions" {
 		t.Fatal("Ctrl+P did not open the session popup")
 	}
+	// Sessions load asynchronously; deliver the result like the runtime would.
+	if cmd == nil {
+		t.Fatal("session popup did not start an async load")
+	}
+	m.Update(cmd())
 	if len(m.popup.items) != 1 || m.popup.items[0].id != currentID {
 		t.Fatalf("workspace sessions = %+v, want only %s", m.popup.items, currentID)
 	}
@@ -455,7 +465,7 @@ func TestCtrlPSessionPopupFiltersWorkspaceAndPreservesDraft(t *testing.T) {
 }
 
 func TestSessionPopupSelectionRequestsSafeSwitch(t *testing.T) {
-	m := NewChat(&agent.Agent{Config: agent.Config{Model: "test-model"}, Workdir: t.TempDir()})
+	m := NewChat(&agent.Agent{Config: agent.Config{Model: "test-model"}, ExecEnv: agent.ExecEnv{Workdir: t.TempDir()}})
 	model, cmd := m.applyPopupSelection("sessions", popupItem{id: "1234abcd"})
 	result := model.(*ChatModel)
 	if cmd == nil || !result.quitting || result.switchSessionID != "1234abcd" {
@@ -674,7 +684,7 @@ func TestInputReservesSecondRowForWindowsIME(t *testing.T) {
 	if lines := strings.Count(m.textarea.View(), "\n") + 1; lines < chatInputRows {
 		t.Fatalf("textarea rows = %d, want at least %d", lines, chatInputRows)
 	}
-	wantViewportHeight := m.height - (chatInputRows + 2) - 2 - 1 - chatConversationGapRows
+	wantViewportHeight := m.height - (chatInputRows + 2) - 2 - 1 - 1 - chatConversationGapRows // input, status, header, activity, gap
 	if m.viewport.Height != wantViewportHeight {
 		t.Fatalf("viewport height = %d, want %d", m.viewport.Height, wantViewportHeight)
 	}
@@ -690,7 +700,7 @@ func TestConversationKeepsGapAboveBottomChrome(t *testing.T) {
 	if len(view) != m.height {
 		t.Fatalf("chat view height = %d, want %d", len(view), m.height)
 	}
-	gapRow := 1 + m.viewport.Height
+	gapRow := 1 + m.viewport.Height + 1 // header + viewport + activity row
 	if gapRow >= len(view) {
 		t.Fatalf("gap row %d outside view with %d lines", gapRow, len(view))
 	}
@@ -704,6 +714,7 @@ func TestConversationKeepsGapAboveBottomChrome(t *testing.T) {
 
 func TestModelSwitchNoticeStartsANewMessageBlock(t *testing.T) {
 	m := newChatTestModel()
+	m.Update(agentReadyMsg{})
 	m.lines = []string{"previous reply"}
 	m.applyPopupSelection("models", popupItem{id: "deepseek-v4-pro"})
 	if len(m.lines) != 3 || m.lines[1] != "" || !strings.Contains(ansi.Strip(m.lines[2]), "switched to") {
@@ -815,7 +826,7 @@ func TestInputDrawsPromptOnlyOnFirstRow(t *testing.T) {
 func TestResumeHistoryUsesCurrentTUIAndHidesInternalContext(t *testing.T) {
 	a := &agent.Agent{
 		Config:  agent.Config{Model: "deepseek-v4-pro"},
-		Workdir: `F:\BoltCode`,
+		ExecEnv: agent.ExecEnv{Workdir: `F:\BoltCode`},
 		Messages: []agent.Message{
 			{Role: "user", Content: "## Current Project\nprivate scan data\n\n## User request\n检查项目架构"},
 			{Role: "assistant", Content: []interface{}{

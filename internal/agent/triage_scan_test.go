@@ -10,7 +10,7 @@ import (
 // to the LLM). It's a smoke test that the scan produces useful, non-empty
 // context for a real codebase.
 func TestScanProjectAtRealRepo(t *testing.T) {
-	a := &Agent{Workdir: "../../", RepoRoot: "../../"}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: "../../"}, RepoRoot: "../../"}
 	out := a.scanProjectAt("../../")
 	if out == "" {
 		t.Fatal("scanProjectAt returned empty for real repo")
@@ -29,7 +29,7 @@ func TestScanProjectAtRealRepo(t *testing.T) {
 // must NOT call the API directly.
 func TestRunTriageAppendsPrompt(t *testing.T) {
 	a := &Agent{
-		Workdir:  "../../",
+		ExecEnv:  ExecEnv{Workdir: "../../"},
 		RepoRoot: "../../",
 		Messages: []Message{{Role: "user", Content: "hi"}},
 	}
@@ -54,7 +54,7 @@ func TestRunTriageAppendsPrompt(t *testing.T) {
 // TestRunTriageRepoScopeFallback confirms that when RepoRoot is empty, the
 // repo scope degrades gracefully to worktree instead of crashing.
 func TestRunTriageRepoScopeFallback(t *testing.T) {
-	a := &Agent{Workdir: "../../", RepoRoot: ""} // no repo root
+	a := &Agent{ExecEnv: ExecEnv{Workdir: "../../"}, RepoRoot: ""} // no repo root
 	got := a.runTriage("repo")
 	if !got {
 		t.Fatal("runTriage(repo) with empty RepoRoot should still return true")

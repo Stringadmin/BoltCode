@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -144,7 +145,7 @@ func RunChat(a *agent.Agent) (string, error) {
 	}
 	os.Stdout = writer
 
-	go forwardAgentOutput(reader, model.lineCh)
+	go forwardAgentOutput(reader, model.lineCh, a.Done())
 	go func() {
 		defer close(model.agentDone)
 		model.resultCh <- a.Run(model.nextAgentInput)
@@ -176,18 +177,31 @@ func RunChat(a *agent.Agent) (string, error) {
 	return model.switchSessionID, runErr
 }
 
-func forwardAgentOutput(reader *os.File, lines chan<- string) {
+func forwardAgentOutput(reader *os.File, lines chan<- string, done <-chan struct{}) {
 	defer close(lines)
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 1<<20), 4<<20)
-	for scanner.Scan() {
-		clean, drop := normalizeAgentLine(scanner.Text())
-		if drop {
-			continue
+	// ReadString tolerates arbitrarily long lines; Scanner would abort the
+	// whole stream at its buffer cap and close lineCh early. Overlong lines
+	// are truncated instead so one huge line cannot end the display stream.
+	const maxLine = 4 << 20
+	br := bufio.NewReader(reader)
+	for {
+		raw, err := br.ReadString('\n')
+		if raw != "" {
+			line := strings.TrimSuffix(raw, "\n")
+			if len(line) > maxLine {
+				line = line[:maxLine] + "… [line truncated]"
+			}
+			clean, drop := normalizeAgentLine(line)
+			if !drop {
+				select {
+				case lines <- clean:
+				case <-done:
+					return
+				}
+			}
 		}
-		select {
-		case lines <- clean:
-		default:
+		if err != nil {
+			return
 		}
 	}
 }

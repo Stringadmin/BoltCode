@@ -68,7 +68,7 @@ func TestProviderPayloadsAdvertiseOnlyModeAllowedTools(t *testing.T) {
 
 func TestExecToolRejectsModeBypassBeforeMutation(t *testing.T) {
 	dir := t.TempDir()
-	a := &Agent{Mode: ModePlan, Workdir: dir}
+	a := &Agent{Mode: ModePlan, ExecEnv: ExecEnv{Workdir: dir}}
 	result := a.ExecTool(ToolCall{ID: "tool_1", Name: "write_file", Input: json.RawMessage(`{"path":"blocked.txt","content":"no"}`)})
 	if !result.IsError || result.ToolUseID != "tool_1" {
 		t.Fatalf("blocked result = %+v", result)

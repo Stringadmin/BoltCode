@@ -488,7 +488,7 @@ func (a *Agent) createNewProfile() bool {
 		fmt.Println("  " + ansiRed + parseErr.Error() + ansiReset)
 		return false
 	}
-	reasoningRaw := strings.TrimSpace(a.readWith("  reasoning effort (auto/low/medium/high) [auto]: "))
+	reasoningRaw := strings.TrimSpace(a.readWith("  reasoning effort (auto/low/medium/high/xhigh) [auto]: "))
 	reasoningEffort, parseErr := ParseReasoningEffort(reasoningRaw)
 	if parseErr != nil {
 		fmt.Println("  " + ansiRed + parseErr.Error() + ansiReset)

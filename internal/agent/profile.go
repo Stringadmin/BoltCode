@@ -40,6 +40,12 @@ func profileLockPath() string {
 // releases it. It is the single chokepoint that keeps profile RMW sequences
 // atomic across concurrent BoltCode processes.
 func withProfileLock(fn func() error) error {
+	// The lock file lives next to agent.json; on a fresh machine the dir may
+	// not exist yet, and opening the lock would fail before SaveProfiles gets
+	// a chance to create it.
+	if err := os.MkdirAll(filepath.Dir(profileLockPath()), 0o700); err != nil {
+		return fmt.Errorf("creating profile dir: %w", err)
+	}
 	fl, err := fio.NewFileLock(profileLockPath())
 	if err != nil {
 		return fmt.Errorf("opening profile lock: %w", err)
@@ -194,6 +200,35 @@ func SwitchProfile(name string) (*Profile, error) {
 		return nil, err
 	}
 	return activated, nil
+}
+
+// DeleteProfile removes a profile by name. If the deleted profile was current,
+// the first remaining profile becomes current (or current is cleared).
+func DeleteProfile(name string) error {
+	return withProfileLock(func() error {
+		pf, err := LoadProfiles()
+		if err != nil {
+			return err
+		}
+		idx := -1
+		for i := range pf.Profiles {
+			if pf.Profiles[i].Name == name {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return fmt.Errorf("no profile named %q — have: %s", name, pf.ProfileNames())
+		}
+		pf.Profiles = append(pf.Profiles[:idx], pf.Profiles[idx+1:]...)
+		if pf.Current == name {
+			pf.Current = ""
+			if len(pf.Profiles) > 0 {
+				pf.Current = pf.Profiles[0].Name
+			}
+		}
+		return SaveProfiles(pf)
+	})
 }
 
 // SetCurrentModel updates the model of the active profile only, leaving the

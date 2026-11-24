@@ -7,11 +7,19 @@
 Solo mode works out of the box — one person + one AI agent.
 Team mode adds worktree-isolated multi-agent review: AI proposes, humans approve and merge.
 
-[Install](#install) · [Quick Start](#quick-start) · [Docs](docs/manual.md) · [中文](#中文)
+[Desktop](#desktop-windows-preview) · [CLI install](#install) · [Quick Start](#quick-start) · [Docs](docs/manual.md) · [中文](#中文)
 
 </div>
 
 ---
+
+## Desktop (Windows preview)
+
+Open a Git repository, develop through a conversation, and review each change in the
+Diff panel before merging. Each conversation uses its own Git worktree.
+
+Build with `pwsh -File desktop/build.ps1`. See the [desktop guide](desktop/README.md)
+for prerequisites and setup.
 
 ## Why BoltCode
 
@@ -117,6 +125,32 @@ beyond git.
 Conversations auto-save on exit — resume later with `boltcode --resume <id>`. History is
 bounded to 500 sessions / 180 days by default; override with `BOLTCODE_SESSION_MAX` and
 `BOLTCODE_SESSION_RETENTION_DAYS` (set either to `0` to disable that cleanup boundary).
+
+## OpenCode Dataset Import
+
+BoltCode can normalize OpenCode sessions into provider-neutral JSONL traces for later
+evaluation or training. This optional command requires the `opencode` CLI; normal BoltCode
+agent use remains a single-binary workflow.
+
+```bash
+boltcode dataset import-opencode \
+  --project /path/to/project \
+  --output ./opencode-traces.jsonl
+```
+
+The default mode asks OpenCode to sanitize transcript and file data. For a local project that
+you own and are authorized to use for training, `--raw-source` preserves code and tool results
+before BoltCode applies its own recursive secret redaction. Both modes remove private
+reasoning/thinking parts and run OpenCode with external plugins disabled.
+
+```bash
+boltcode dataset import-opencode \
+  --project /path/to/project \
+  --output ./opencode-local-traces.jsonl \
+  --raw-source
+```
+
+Existing output files are not replaced unless `--force` is supplied.
 
 ## Documentation
 

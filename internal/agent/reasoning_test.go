@@ -13,6 +13,7 @@ func TestParseReasoningEffort(t *testing.T) {
 		"low":    ReasoningLow,
 		"MEDIUM": ReasoningMedium,
 		"high":   ReasoningHigh,
+		"xhigh":  ReasoningXHigh,
 	} {
 		got, err := ParseReasoningEffort(input)
 		if err != nil || got != want {
@@ -33,6 +34,7 @@ func TestAnthropicReasoningEffortControlsThinkingBudget(t *testing.T) {
 		{ReasoningLow, 2_048},
 		{ReasoningMedium, 8_192},
 		{ReasoningHigh, 32_000},
+		{ReasoningXHigh, 48_000},
 	}
 	for _, test := range tests {
 		t.Run(string(test.effort), func(t *testing.T) {
@@ -65,6 +67,7 @@ func TestOpenAICompatibleReasoningEffortIsOptional(t *testing.T) {
 		{ReasoningLow, "low"},
 		{ReasoningMedium, "medium"},
 		{ReasoningHigh, "high"},
+		{ReasoningXHigh, "xhigh"},
 	} {
 		payload := buildOpenAIPayload(Config{Provider: "deepseek", Model: "deepseek-reasoner", ReasoningEffort: test.effort}, "system", nil)
 		var body map[string]interface{}
@@ -75,6 +78,30 @@ func TestOpenAICompatibleReasoningEffortIsOptional(t *testing.T) {
 		if got != test.want {
 			t.Errorf("effort %q payload = %q, want %q", test.effort, got, test.want)
 		}
+	}
+}
+
+func TestExtraHighReasoningUsesProviderSpecificPayloads(t *testing.T) {
+	cfg := Config{Provider: "deepseek", Model: "deepseek-v4-pro", ReasoningEffort: ReasoningXHigh}
+	var body map[string]any
+	if err := json.Unmarshal(buildOpenAIPayload(cfg, "system", nil), &body); err != nil || body["reasoning_effort"] != "max" {
+		t.Fatalf("DeepSeek maximum effort: %v, %v", body, err)
+	}
+	cfg = Config{Provider: "responses", Model: "gpt-5.4", ReasoningEffort: ReasoningXHigh}
+	if err := json.Unmarshal(buildResponsesPayloadWithTools(cfg, "system", nil, nil), &body); err != nil {
+		t.Fatal(err)
+	}
+	if reasoning, _ := body["reasoning"].(map[string]any); reasoning["effort"] != "xhigh" {
+		t.Fatalf("Responses extra high effort: %v", body)
+	}
+	cfg = Config{Provider: "anthropic", Model: "claude-opus-4-7", ReasoningEffort: ReasoningXHigh}
+	if err := json.Unmarshal(buildAnthropicPayload(cfg, "system", nil), &body); err != nil {
+		t.Fatal(err)
+	}
+	thinking, _ := body["thinking"].(map[string]any)
+	output, _ := body["output_config"].(map[string]any)
+	if thinking["type"] != "adaptive" || output["effort"] != "xhigh" {
+		t.Fatalf("Claude adaptive effort: %v", body)
 	}
 }
 

@@ -120,7 +120,7 @@ func TestRunConfigCancelBeforeSave(t *testing.T) {
 	}
 	defer rl.Close()
 
-	s := &Session{rl: rl}
+	s := &Session{rl: rl, scripted: true}
 	s.runConfig(nil)
 
 	profiles, _, err := command.ListProfiles()
@@ -155,7 +155,7 @@ func TestRunConfigPasswordKeepsFollowingInputIntact(t *testing.T) {
 	}
 	defer rl.Close()
 
-	s := &Session{rl: rl}
+	s := &Session{rl: rl, scripted: true}
 	s.runConfig(nil)
 
 	profiles, current, err := command.ListProfiles()

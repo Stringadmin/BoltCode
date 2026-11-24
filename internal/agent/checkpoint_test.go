@@ -9,7 +9,7 @@ import (
 
 func TestUndoRestoresWriteAndEditToolsInOrder(t *testing.T) {
 	dir := t.TempDir()
-	a := &Agent{Workdir: dir}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: dir}}
 	write := a.ExecTool(ToolCall{ID: "write", Name: "write_file", Input: json.RawMessage(`{"path":"note.txt","content":"one"}`)})
 	if write.IsError {
 		t.Fatal(write.Content)
@@ -44,7 +44,7 @@ func TestUndoRenameRestoresBothPaths(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "to.txt"), []byte("destination"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := &Agent{Workdir: dir}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: dir}}
 	result := a.ExecTool(ToolCall{ID: "rename", Name: "rename_file", Input: json.RawMessage(`{"from":"from.txt","to":"to.txt"}`)})
 	if result.IsError {
 		t.Fatal(result.Content)
@@ -61,7 +61,7 @@ func TestUndoRenameRestoresBothPaths(t *testing.T) {
 
 func TestFailedToolDoesNotCreateCheckpointAndReadonlyModeCannotUndo(t *testing.T) {
 	dir := t.TempDir()
-	a := &Agent{Workdir: dir}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: dir}}
 	failed := a.ExecTool(ToolCall{ID: "edit", Name: "edit_file", Input: json.RawMessage(`{"path":"missing.txt","old_string":"x","new_string":"y"}`)})
 	if !failed.IsError || len(a.undoStack) != 0 {
 		t.Fatalf("failed tool checkpointed: result=%+v stack=%d", failed, len(a.undoStack))

@@ -66,7 +66,7 @@ func memoryPath(workdir string) string {
 
 // LoadMemory reads the persistent memory from disk.
 func (a *Agent) LoadMemory() *ProjectMemory {
-	path := memoryPath(a.Workdir)
+	path := a.memoryPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return &ProjectMemory{FileMap: make(map[string]string)}
@@ -88,7 +88,7 @@ func (a *Agent) LoadMemory() *ProjectMemory {
 // no cross-process lock is needed — atomicity is enough.
 func (a *Agent) SaveMemory(mem *ProjectMemory) error {
 	mem.UpdatedAt = time.Now()
-	path := memoryPath(a.Workdir)
+	path := a.memoryPath()
 	data, err := json.MarshalIndent(mem, "", "  ")
 	if err != nil {
 		return err
@@ -96,7 +96,14 @@ func (a *Agent) SaveMemory(mem *ProjectMemory) error {
 	return fio.WriteFileAtomic(path, data, 0o600)
 }
 
-// MemoryContext returns a formatted string of the memory for injection into prompts.
+func (a *Agent) memoryPath() string {
+	if a.MemoryFile != "" {
+		return a.MemoryFile
+	}
+	return memoryPath(a.Workdir)
+}
+
+// Context returns a formatted string of the memory for injection into prompts.
 func (mem *ProjectMemory) Context() string {
 	var parts []string
 

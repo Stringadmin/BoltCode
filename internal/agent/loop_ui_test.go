@@ -20,7 +20,7 @@ func TestComposeInitialUserMessageUsesRealRequest(t *testing.T) {
 }
 
 func TestNewTUISessionWaitsForRealInputBeforeAPI(t *testing.T) {
-	a := &Agent{Workdir: t.TempDir(), Config: Config{Model: "test-model"}, UIMode: true, NoSpinner: true}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: t.TempDir()}, Config: Config{Model: "test-model"}, UIMode: true, NoSpinner: true}
 	calls := 0
 	if err := a.Run(func() string {
 		calls++
@@ -104,7 +104,7 @@ func TestDisplayToolPathMakesWorkspacePathRelative(t *testing.T) {
 	if filepath.Separator == '/' {
 		workdir = "/workspace/BoltCode"
 	}
-	a := &Agent{Workdir: workdir}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: workdir}}
 	got := a.displayToolPath(filepath.Join(workdir, "internal", "agent", "exec.go"))
 	if got != "internal/agent/exec.go" {
 		t.Fatalf("display path = %q", got)

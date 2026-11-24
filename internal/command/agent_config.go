@@ -189,6 +189,11 @@ func ListProfiles() ([]agent.Profile, string, error) {
 	return pf.Profiles, pf.Current, nil
 }
 
+// DeleteProfile removes a named provider profile.
+func DeleteProfile(name string) error {
+	return agent.DeleteProfile(name)
+}
+
 // LoadOwnAgentConfig reads ONLY BoltCode's own ~/.boltcode/agent.json (no Claude
 // fallback) and returns the active profile as a Config. Used to pre-fill the
 // config wizard with the current profile's values.

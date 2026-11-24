@@ -24,13 +24,26 @@ func (m *ChatModel) showCommandPopup() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// showSessionPopup opens the popup immediately with a loading note and lists
+// sessions asynchronously: ListSessions walks the session dir, and doing that
+// on the UI goroutine stuttered every Ctrl+P.
 func (m *ChatModel) showSessionPopup() (tea.Model, tea.Cmd) {
-	sessions, err := agent.ListSessions()
-	if err != nil {
-		m.statusHint = "could not load saved sessions"
-		return m, nil
+	m.popupSeq++
+	seq := m.popupSeq
+	m.popup = &popupState{
+		kind:          "sessions",
+		title:         "Sessions",
+		subtitle:      filepath.Clean(m.agent.Workdir) + " · loading…",
+		preserveInput: true,
 	}
+	m.popup.applyFilter("")
+	return m, func() tea.Msg {
+		sessions, err := agent.ListSessions()
+		return sessionsListedMsg{seq: seq, sessions: sessions, err: err}
+	}
+}
 
+func (m *ChatModel) sessionPopupItems(sessions []agent.Session) []popupItem {
 	items := make([]popupItem, 0, len(sessions))
 	for _, session := range sessions {
 		if !sameWorkdir(session.Workdir, m.agent.Workdir) {
@@ -48,20 +61,7 @@ func (m *ChatModel) showSessionPopup() (tea.Model, tea.Cmd) {
 		}
 		items = append(items, popupItem{id: session.ID, label: preview, desc: desc})
 	}
-	if len(items) == 0 {
-		m.statusHint = "no saved sessions for this workspace"
-		return m, nil
-	}
-
-	m.popup = &popupState{
-		kind:          "sessions",
-		items:         items,
-		title:         "Sessions",
-		subtitle:      filepath.Clean(m.agent.Workdir),
-		preserveInput: true,
-	}
-	m.popup.applyFilter("")
-	return m, nil
+	return items
 }
 
 func sameWorkdir(left, right string) bool {
@@ -81,7 +81,6 @@ func (m *ChatModel) showModelPopup() (tea.Model, tea.Cmd) {
 	models := agent.AvailableModels(m.agent.Config)
 	if len(models) == 0 {
 		m.lines = append(m.lines, chatDimStyle.Render("  no model list for provider: "+m.agent.Config.Provider))
-		m.logDirty = true
 		m.refreshViewport()
 		return m, nil
 	}
@@ -108,24 +107,22 @@ func (m *ChatModel) showModePopup() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// showFilePopup opens immediately and scans the workspace asynchronously —
+// walking up to 2000 files on the UI goroutine froze input on large repos.
 func (m *ChatModel) showFilePopup() (tea.Model, tea.Cmd) {
-	files := m.scanFiles()
-	if len(files) == 0 {
-		return m, nil
-	}
-	items := make([]popupItem, 0, len(files))
-	for _, file := range files {
-		items = append(items, popupItem{id: file, label: file})
-	}
-	m.popup = &popupState{kind: "files", items: items, title: "Files (@)"}
+	m.popupSeq++
+	seq := m.popupSeq
+	m.popup = &popupState{kind: "files", title: "Files (@) · scanning…"}
 	m.popup.applyFilter("")
-	return m, nil
+	workdir := m.agent.Workdir
+	return m, func() tea.Msg {
+		return filesScannedMsg{seq: seq, files: scanWorkspaceFiles(workdir)}
+	}
 }
 
-func (m *ChatModel) scanFiles() []string {
+func scanWorkspaceFiles(root string) []string {
 	var files []string
 	const maxFiles = 2000
-	root := m.agent.Workdir
 	filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -146,6 +143,12 @@ func (m *ChatModel) scanFiles() []string {
 		return nil
 	})
 	return files
+}
+
+// popupVisibleRows is the shared page size for popup rendering and paging
+// keys, so PgUp/PgDn move exactly one rendered page.
+func popupVisibleRows(height int) int {
+	return min(12, max(3, height-10))
 }
 
 func (p *popupState) applyFilter(query string) {
@@ -204,7 +207,7 @@ func (m *ChatModel) handlePopupKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc, tea.KeyCtrlC:
 		m.popup = nil
 		if popup.kind == "confirm" {
-			m.confirmCh <- false
+			m.answerConfirm(false)
 			return m, nil
 		}
 		if !popup.preserveInput {
@@ -225,6 +228,12 @@ func (m *ChatModel) handlePopupKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if popup.selected < len(popup.filtered)-1 {
 			popup.selected++
 		}
+		return m, nil
+	case tea.KeyPgUp:
+		popup.selected = max(0, popup.selected-popupVisibleRows(m.height))
+		return m, nil
+	case tea.KeyPgDown:
+		popup.selected = min(max(0, len(popup.filtered)-1), popup.selected+popupVisibleRows(m.height))
 		return m, nil
 	case tea.KeyBackspace:
 		if popup.kind != "confirm" && len(popup.filter) > 0 {
@@ -255,13 +264,16 @@ func (m *ChatModel) handlePopupKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *ChatModel) applyPopupSelection(kind string, selection popupItem) (tea.Model, tea.Cmd) {
 	switch kind {
 	case "models":
+		// The agent reads Config.Model while a request is in flight, so only
+		// switch models between turns.
+		if m.busy || m.finished {
+			m.statusHint = "model can be changed when the agent is ready"
+			return m, nil
+		}
 		m.agent.Config.Model = selection.id
 		m.model = selection.id
-		if len(m.lines) > 0 && m.lines[len(m.lines)-1] != "" {
-			m.lines = append(m.lines, "")
-		}
+		m.appendLogBlank()
 		m.lines = append(m.lines, chatGreenStyle.Render("  ✓ switched to: ")+selection.id)
-		m.logDirty = true
 		m.refreshViewport()
 		m.viewport.GotoBottom()
 		return m, nil
@@ -297,29 +309,44 @@ func (m *ChatModel) applyPopupSelection(kind string, selection popupItem) (tea.M
 	case "confirm":
 		switch selection.id {
 		case "yes":
-			m.confirmCh <- true
+			m.answerConfirm(true)
 		case "allow":
+			// Written before the answer is delivered, so the channel
+			// synchronization orders it ahead of the agent's next read.
 			m.agent.AutoAllow = true
-			m.confirmCh <- true
+			m.answerConfirm(true)
 		default:
-			m.confirmCh <- false
+			m.answerConfirm(false)
 		}
 		return m, nil
 	}
 	return m, nil
 }
 
+// answerConfirm delivers the popup decision to the waiting ConfirmFn. When the
+// agent was cancelled while the popup was open nobody is receiving, so the
+// send selects on Done instead of blocking the update loop forever.
+func (m *ChatModel) answerConfirm(answer bool) {
+	select {
+	case m.confirmCh <- answer:
+	case <-m.agent.Done():
+	}
+}
+
 func (m *ChatModel) setChatMode(mode agent.Mode) (tea.Model, tea.Cmd) {
+	// SetMode is a plain field write with no locking; applying it mid-turn
+	// races the agent's own reads, so only switch between turns.
+	if m.busy || m.finished {
+		m.statusHint = "mode can be changed when the agent is ready"
+		return m, nil
+	}
 	m.agent.SetMode(mode)
 	m.mode = m.agent.EffectiveMode()
 	m.statusHint = "mode changed to " + string(m.mode)
-	if len(m.lines) > 0 && m.lines[len(m.lines)-1] != "" {
-		m.lines = append(m.lines, "")
-	}
+	m.appendLogBlank()
 	m.lines = append(m.lines,
 		chatPromptStyle.Render("  ◇ mode: ")+strings.ToUpper(string(m.mode))+chatDimStyle.Render(" · "+agent.ModeDescription(m.mode)),
 	)
-	m.logDirty = true
 	m.refreshViewport()
 	m.viewport.GotoBottom()
 	m.textarea.Reset()

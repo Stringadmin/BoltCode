@@ -61,7 +61,7 @@ func TestSafeJoin(t *testing.T) {
 func newAgentInTemp(t *testing.T) *Agent {
 	t.Helper()
 	dir := t.TempDir()
-	return &Agent{Workdir: dir}
+	return &Agent{ExecEnv: ExecEnv{Workdir: dir}}
 }
 
 func writeFile(t *testing.T, path, content string) {

@@ -51,7 +51,7 @@ func (m *ChatModel) renderPopupPanel() string {
 	if len(p.filtered) == 0 {
 		items = append(items, chatDimStyle.Render("  (no matches)"))
 	}
-	maxRows := min(12, max(3, m.height-10))
+	maxRows := popupVisibleRows(m.height)
 	start := 0
 	if p.selected >= maxRows {
 		start = p.selected - maxRows + 1

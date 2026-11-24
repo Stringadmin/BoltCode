@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/Stringadmin/BoltCode/internal/subprocess"
 )
 
 // ErrInterrupted identifies a git child process stopped by Ctrl+C. Callers can
@@ -23,7 +25,8 @@ var ErrInterrupted = errors.New("git operation interrupted")
 
 // Repo is a handle to a git repository rooted at Root (the main worktree).
 type Repo struct {
-	Root string
+	Root  string
+	Quiet bool
 }
 
 // gitEnv returns the environment for git commands run by BoltCode. It forces
@@ -45,7 +48,7 @@ func gitEnv() []string {
 // run executes a git command inside the repo root and returns trimmed stdout.
 // On failure it returns an error that includes stderr for diagnosis.
 func (r *Repo) run(args ...string) (string, error) {
-	return runIn(r.Root, args...)
+	return runInWithConsoleMode(r.Root, r.Quiet, args...)
 }
 
 // Run is the exported version of run, for use by command-layer code that needs
@@ -66,7 +69,14 @@ func (r *Repo) ConfigUser() string {
 }
 
 func runIn(dir string, args ...string) (string, error) {
+	return runInWithConsoleMode(dir, false, args...)
+}
+
+func runInWithConsoleMode(dir string, quiet bool, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
+	if quiet {
+		subprocess.HideConsole(cmd)
+	}
 	cmd.Dir = dir
 	cmd.Env = gitEnv()
 	var out, errBuf bytes.Buffer

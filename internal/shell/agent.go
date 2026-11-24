@@ -96,7 +96,7 @@ func (s *Session) launchAgent(workdir, intent string, task *model.Task) {
 
 	a := &agent.Agent{
 		Config:   *cfg,
-		Workdir:  workdir,
+		ExecEnv:  agent.ExecEnv{Workdir: workdir},
 		RepoRoot: s.App.Repo.Root,
 		Intent:   intent,
 		// Command confirmation is handled by the TUI's confirm popup

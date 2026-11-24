@@ -8,11 +8,28 @@ import (
 // Open discovers the git repository containing dir and returns a handle to its
 // top-level worktree. It returns an error if dir is not inside a git repo.
 func Open(dir string) (*Repo, error) {
-	root, err := runIn(dir, "rev-parse", "--show-toplevel")
+	return open(dir, false)
+}
+
+// OpenQuiet discovers a repository without opening a Windows console.
+func OpenQuiet(dir string) (*Repo, error) {
+	return open(dir, true)
+}
+
+func open(dir string, quiet bool) (*Repo, error) {
+	root, err := runInWithConsoleMode(dir, quiet, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{Root: filepath.Clean(root)}, nil
+	return &Repo{Root: filepath.Clean(root), Quiet: quiet}, nil
+}
+
+// InitRepo runs `git init` in dir and returns a handle to the new repo.
+func InitRepo(dir string) (*Repo, error) {
+	if _, err := runIn(dir, "init"); err != nil {
+		return nil, err
+	}
+	return Open(dir)
 }
 
 // CurrentBranch returns the checked-out branch name of the main worktree.

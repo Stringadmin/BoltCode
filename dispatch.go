@@ -48,6 +48,8 @@ func dispatch(cmd string, args []string) error {
 		return runSync(wd, args)
 	case "completion":
 		return runCompletion(args)
+	case "dataset":
+		return runDataset(wd, args)
 	case "team":
 		return runTeam(wd, args)
 	case "tui":

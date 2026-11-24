@@ -82,6 +82,13 @@ func TestDispatchCompletionNoArgsErrors(t *testing.T) {
 	}
 }
 
+func TestDispatchDatasetNoArgsShowsDatasetUsage(t *testing.T) {
+	err := dispatch("dataset", nil)
+	if err == nil || !strings.Contains(err.Error(), "dataset import-opencode") {
+		t.Fatalf("dataset dispatch error = %v", err)
+	}
+}
+
 func TestDispatchRejectsUnknownCommand(t *testing.T) {
 	err := dispatch("definitely-not-a-command", nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown command") {

@@ -7,7 +7,7 @@ import (
 )
 
 func TestToolEventCarriesExactActivityAndDetail(t *testing.T) {
-	a := &Agent{Workdir: `F:\BoltCode`}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: `F:\BoltCode`}}
 	input, _ := json.Marshal(map[string]string{"path": "internal/tui/chat.go"})
 	event := a.toolEvent(ToolCall{ID: "call-1", Name: "read_file", Input: input})
 	if event.Kind != EventToolStarted || event.Activity != "Reading file" {

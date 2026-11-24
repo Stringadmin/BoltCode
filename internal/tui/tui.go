@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Stringadmin/BoltCode/internal/command"
 	"github.com/Stringadmin/BoltCode/internal/model"
@@ -29,8 +30,13 @@ type Model struct {
 	app             *command.App
 	proposals       []*model.Proposal
 	cursor          int
+	listOffset      int // first visible proposal when the list exceeds the screen
 	current         view
 	diff            string
+	diffLines       []string // diff pre-wrapped to the current width
+	diffAdds        int
+	diffDels        int
+	diffFiles       int
 	width           int
 	height          int
 	scroll          int
@@ -82,6 +88,12 @@ var (
 	statusStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color(theme.ColorSuccess))
+
+	// Diff line styles, hoisted out of the per-line render loop.
+	diffAddStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorSuccess))
+	diffDelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorDanger))
+	diffHeadStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorMutedText))
+	diffHunkStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorAccent))
 )
 
 func (m Model) Init() tea.Cmd {
@@ -99,6 +111,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.confirmingMerge {
 			if pending, err := m.app.ListPending(); err == nil {
 				m.proposals = pending
+				if m.cursor >= len(m.proposals) {
+					m.cursor = max(0, len(m.proposals)-1)
+				}
+				m.clampListWindow()
 			}
 		}
 		return m, tickCmd() // schedule the next refresh
@@ -106,6 +122,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.diff != "" {
+			m.diffLines = wrapDiff(m.diff, m.width)
+		}
+		m.clampListWindow()
+		return m, nil
+
+	case tea.MouseMsg:
+		event := tea.MouseEvent(msg)
+		if !event.IsWheel() {
+			return m, nil
+		}
+		delta := 1
+		if event.Button == tea.MouseButtonWheelUp {
+			delta = -1
+		}
+		if m.current == viewDiff {
+			m.scroll = max(0, min(m.maxDiffScroll(), m.scroll+3*delta))
+		} else {
+			m.cursor = max(0, min(len(m.proposals)-1, m.cursor+delta))
+			m.clampListWindow()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -142,6 +179,14 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(m.proposals)-1 {
 			m.cursor++
 		}
+	case "pgup":
+		m.cursor = max(0, m.cursor-m.listVisibleRows())
+	case "pgdown":
+		m.cursor = min(max(0, len(m.proposals)-1), m.cursor+m.listVisibleRows())
+	case "home", "g":
+		m.cursor = 0
+	case "end", "G":
+		m.cursor = max(0, len(m.proposals)-1)
 	case "enter", "d":
 		if len(m.proposals) > 0 {
 			p := m.proposals[m.cursor]
@@ -150,6 +195,8 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.message = "error: " + err.Error()
 			} else {
 				m.diff = diff
+				m.diffLines = wrapDiff(diff, m.width)
+				m.diffAdds, m.diffDels, m.diffFiles = diffStats(diff)
 				m.scroll = 0
 				m.current = viewDiff
 			}
@@ -193,6 +240,7 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	m.clampListWindow()
 	return m, nil
 }
 
@@ -206,7 +254,36 @@ func (m *Model) removeCurrent() {
 	}
 }
 
+// listVisibleRows is how many proposals fit between the title and the footer.
+func (m Model) listVisibleRows() int {
+	return max(3, m.height-6)
+}
+
+// clampListWindow keeps the scroll window over the cursor after movement,
+// removals, reloads, and resizes.
+func (m *Model) clampListWindow() {
+	visible := m.listVisibleRows()
+	if m.cursor < m.listOffset {
+		m.listOffset = m.cursor
+	}
+	if m.cursor >= m.listOffset+visible {
+		m.listOffset = m.cursor - visible + 1
+	}
+	m.listOffset = max(0, min(m.listOffset, max(0, len(m.proposals)-visible)))
+}
+
+// diffVisibleRows is the diff content height: screen minus the two-line
+// header, the blank separator, and the two-line footer.
+func (m Model) diffVisibleRows() int {
+	return max(1, m.height-6)
+}
+
+func (m Model) maxDiffScroll() int {
+	return max(0, len(m.diffLines)-m.diffVisibleRows())
+}
+
 func (m Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	page := m.diffVisibleRows()
 	switch msg.String() {
 	case "q", "esc", "backspace":
 		m.current = viewList
@@ -215,7 +292,15 @@ func (m Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scroll--
 		}
 	case "down", "j":
-		m.scroll++
+		m.scroll = min(m.maxDiffScroll(), m.scroll+1)
+	case "pgup":
+		m.scroll = max(0, m.scroll-page)
+	case "pgdown":
+		m.scroll = min(m.maxDiffScroll(), m.scroll+page)
+	case "home", "g":
+		m.scroll = 0
+	case "end", "G":
+		m.scroll = m.maxDiffScroll()
 	case "a", "m", "r":
 		// The diff view advertises a/m/r in its help line, so they must work
 		// here too: switch back to the list and delegate, reusing the exact
@@ -247,31 +332,68 @@ func (m Model) View() string {
 
 func (m Model) viewList() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("  BOLTCODE — Review Dashboard") + "\n\n")
+	title := titleStyle.Render(" ⚡ BOLTCODE") + helpStyle.Render(" · Review Dashboard")
+	b.WriteString(chatHeaderStyle.Width(m.width).Render(ansi.Truncate(title, m.width, "…")) + "\n\n")
 
 	if len(m.proposals) == 0 {
-		b.WriteString(normalStyle.Render("  nothing to review — all caught up") + "\n")
+		b.WriteString(helpStyle.Render("  ✨ nothing to review — all caught up") + "\n")
 	} else {
-		for i, p := range m.proposals {
-			line := fmt.Sprintf("  %-10s [%-12s] %s", p.ID, p.Agent, p.Summary)
+		end := min(len(m.proposals), m.listOffset+m.listVisibleRows())
+		for i := m.listOffset; i < end; i++ {
+			p := m.proposals[i]
+			line := fmt.Sprintf("  %-10s", p.ID) + " " +
+				fmt.Sprintf("%-12s", p.Agent) + " " + p.Summary
 			if i == m.cursor {
-				b.WriteString(selectedStyle.Render(line) + "\n")
+				b.WriteString(selectedStyle.Width(m.width).Render(line) + "\n")
 			} else {
-				b.WriteString(normalStyle.Render(line) + "\n")
+				b.WriteString(helpStyle.Render(fmt.Sprintf("  %-10s", p.ID)) + " " +
+					chatAccentStyle.Render(fmt.Sprintf("%-12s", p.Agent)) + " " +
+					normalStyle.Render(p.Summary) + "\n")
 			}
 		}
 	}
 
 	b.WriteString("\n")
 	if m.message != "" {
-		b.WriteString(statusStyle.Render("  "+m.message) + "\n\n")
+		b.WriteString(statusStyle.Render(ansi.Truncate("  "+m.message, m.width, "…")) + "\n\n")
 	}
-	help := "  ↑/↓ navigate  enter/d diff  a approve  m merge (press 2×)  r reject  q quit"
+	help := "  ↑/↓ navigate · PgUp/PgDn page · enter/d diff · a approve · m merge (press 2×) · r reject · q quit"
+	if len(m.proposals) > 0 {
+		help = fmt.Sprintf("  %d/%d", m.cursor+1, len(m.proposals)) + help
+	}
 	if m.confirmingMerge {
 		help = "  press m again to confirm merge — any other key cancels"
 	}
-	b.WriteString(helpStyle.Render(help))
+	b.WriteString(helpStyle.Render(ansi.Truncate(help, m.width, "…")))
 	return b.String()
+}
+
+// wrapDiff pre-renders a diff into display lines wrapped at the given width,
+// so long lines neither overflow the screen nor break scroll math.
+func wrapDiff(diff string, width int) []string {
+	var out []string
+	for _, line := range strings.Split(diff, "\n") {
+		out = append(out, strings.Split(wrapChatLine(line, width), "\n")...)
+	}
+	return out
+}
+
+// diffStats summarizes a unified diff: added/removed content lines (file
+// headers excluded) and how many files are touched.
+func diffStats(diff string) (adds, dels, files int) {
+	for _, line := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++ b/"):
+			files++
+		case strings.HasPrefix(line, "+++"):
+		case strings.HasPrefix(line, "+"):
+			adds++
+		case strings.HasPrefix(line, "---"):
+		case strings.HasPrefix(line, "-"):
+			dels++
+		}
+	}
+	return adds, dels, files
 }
 
 func (m Model) viewDiff() string {
@@ -284,34 +406,49 @@ func (m Model) viewDiff() string {
 		return m.viewList()
 	}
 	p := m.proposals[m.cursor]
-	b.WriteString(titleStyle.Render(fmt.Sprintf("  DIFF — %s (%s)", p.ID, p.Summary)) + "\n\n")
+	meta := helpStyle.Render("  ╭─ "+p.ID) +
+		chatAccentStyle.Render(" · "+p.Agent) +
+		helpStyle.Render(" · "+p.Summary)
+	b.WriteString(ansi.Truncate(meta, m.width, "…") + "\n")
+	fileWord := "files"
+	if m.diffFiles == 1 {
+		fileWord = "file"
+	}
+	stats := diffAddStyle.Render(fmt.Sprintf("+%d", m.diffAdds)) + " " +
+		diffDelStyle.Render(fmt.Sprintf("−%d", m.diffDels)) +
+		helpStyle.Render(fmt.Sprintf(" · %d %s", m.diffFiles, fileWord))
+	b.WriteString(helpStyle.Render("  ╰─ ") + stats + "\n\n")
 
-	lines := strings.Split(m.diff, "\n")
-	maxScroll := len(lines) - (m.height - 5)
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	scroll := m.scroll
-	if scroll > maxScroll {
-		scroll = maxScroll
-	}
-	visible := m.height - 5
-	end := scroll + visible
-	if end > len(lines) {
-		end = len(lines)
-	}
+	maxScroll := m.maxDiffScroll()
+	scroll := min(m.scroll, maxScroll)
+	visible := m.diffVisibleRows()
+	end := min(scroll+visible, len(m.diffLines))
 
-	for _, line := range lines[scroll:end] {
-		if strings.HasPrefix(line, "+") {
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorSuccess)).Render(line) + "\n")
-		} else if strings.HasPrefix(line, "-") {
-			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorDanger)).Render(line) + "\n")
-		} else {
+	for _, line := range m.diffLines[scroll:end] {
+		switch {
+		// +++/--- are file headers, not added/removed content.
+		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+			b.WriteString(diffHeadStyle.Render(line) + "\n")
+		case strings.HasPrefix(line, "+"):
+			b.WriteString(diffAddStyle.Render(line) + "\n")
+		case strings.HasPrefix(line, "-"):
+			b.WriteString(diffDelStyle.Render(line) + "\n")
+		case strings.HasPrefix(line, "@@"):
+			b.WriteString(diffHunkStyle.Render(line) + "\n")
+		default:
 			b.WriteString(line + "\n")
 		}
 	}
 
-	b.WriteString("\n" + helpStyle.Render("  ↑/↓ scroll  q/esc back  a approve  m merge (press 2×)  r reject"))
+	scrollPct := 100
+	if maxScroll > 0 {
+		scrollPct = scroll * 100 / maxScroll
+	}
+	// The percentage leads the footer so it survives truncation on narrow
+	// terminals.
+	footer := fmt.Sprintf(
+		"  %d%% · ↑/↓ scroll · PgUp/PgDn page · Home/End ends · q/esc back · a approve · m merge (press 2×) · r reject", scrollPct)
+	b.WriteString("\n" + helpStyle.Render(ansi.Truncate(footer, m.width, "…")))
 	return b.String()
 }
 
@@ -321,7 +458,7 @@ func Run(app *command.App) error {
 	if err != nil {
 		return err
 	}
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
 	return err
 }

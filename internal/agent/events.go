@@ -16,6 +16,9 @@ const (
 	EventToolFinished EventKind = "tool_finished"
 	EventPlanUpdated  EventKind = "plan_updated"
 	EventError        EventKind = "error"
+	EventTextDelta    EventKind = "text_delta"
+	EventTextReset    EventKind = "text_reset"
+	EventText         EventKind = "text"
 )
 
 // Event describes one user-visible runtime transition.
@@ -26,6 +29,8 @@ type Event struct {
 	ToolName    string
 	Detail      string
 	Result      string
+	Progress    bool   // visible assistant text accompanying a tool-use response
+	Diff        string // compact before→after preview for edit/write tools
 	IsError     bool
 	Duration    time.Duration
 	PlanDone    int

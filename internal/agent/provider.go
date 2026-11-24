@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
 )
 
 var fallbackToolCallSeq uint64
+var apiVersionSuffix = regexp.MustCompile(`/v[0-9]+(?:beta[0-9]*)?$`)
+var openAIReasoningModel = regexp.MustCompile(`^o[0-9]+(?:-|$)`)
 
 // isAnthropicProvider returns true if the config points to an Anthropic-native
 // API. Provider "anthropic" (or empty, the default) uses the Anthropic
@@ -40,14 +44,22 @@ func buildOpenAIURL(baseURL string) string {
 	if baseURL == "" {
 		return "https://api.openai.com/v1/chat/completions"
 	}
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if strings.HasSuffix(baseURL, "/chat/completions") {
 		return baseURL
 	}
-	baseURL = strings.TrimRight(baseURL, "/")
-	if strings.HasSuffix(baseURL, "/v1") {
+	if apiVersionSuffix.MatchString(baseURL) {
 		return baseURL + "/chat/completions"
 	}
 	return baseURL + "/v1/chat/completions"
+}
+
+func isOfficialOpenAI(baseURL string) bool {
+	if strings.TrimSpace(baseURL) == "" {
+		return true
+	}
+	endpoint, err := url.Parse(baseURL)
+	return err == nil && strings.EqualFold(endpoint.Hostname(), "api.openai.com")
 }
 
 // buildPayload creates the request body for the configured provider.
@@ -79,7 +91,7 @@ func buildAnthropicPayloadWithTools(cfg Config, system string, messages []Messag
 	}
 	body := map[string]interface{}{
 		"model":    model,
-		"messages": messages,
+		"messages": anthropicMessages(messages),
 		"stream":   true,
 	}
 	body["system"] = []map[string]interface{}{
@@ -99,21 +111,51 @@ func buildAnthropicPayloadWithTools(cfg Config, system string, messages []Messag
 		tools[len(tools)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
 	}
 	body["tools"] = tools
-	// Only send the thinking payload to models known to support it. An
-	// explicit non-auto effort must NOT force the field onto other models —
-	// the Anthropic API rejects "thinking" for them with a 400.
-	if supportsThinking(model) {
-		budgetTokens := anthropicThinkingBudget(NormalizeReasoningEffort(cfg.ReasoningEffort))
+	effort := NormalizeReasoningEffort(cfg.ReasoningEffort)
+	switch {
+	case anthropicAdaptive.MatchString(model):
+		body["thinking"] = map[string]string{"type": "adaptive"}
+		body["max_tokens"] = 32_000
+		if effort == ReasoningXHigh {
+			body["max_tokens"] = 64_000
+			if anthropicEarlyAdaptive.MatchString(model) {
+				effort = "max"
+			}
+		}
+		if effort != ReasoningAuto {
+			body["output_config"] = map[string]ReasoningEffort{"effort": effort}
+		}
+	case anthropicManual.MatchString(model):
+		budgetTokens := anthropicThinkingBudget(effort)
+		if anthropicShortOutput.MatchString(model) {
+			budgetTokens = min(budgetTokens, 24_000)
+		}
 		body["thinking"] = map[string]interface{}{
 			"type":          "enabled",
 			"budget_tokens": budgetTokens,
 		}
 		body["max_tokens"] = budgetTokens + 8192
-	} else {
+	default:
 		body["max_tokens"] = 8192
 	}
 	payload, _ := json.Marshal(body)
 	return payload
+}
+
+func anthropicMessages(messages []Message) []Message {
+	var clean []Message
+	for i, message := range messages {
+		if message.Reasoning != nil {
+			if clean == nil {
+				clean = append([]Message(nil), messages...)
+			}
+			clean[i].Reasoning = nil
+		}
+	}
+	if clean != nil {
+		return clean
+	}
+	return messages
 }
 
 // buildOpenAIPayload builds the OpenAI /v1/chat/completions request body.
@@ -126,18 +168,31 @@ func buildOpenAIPayloadWithTools(cfg Config, system string, messages []Message, 
 	if model == "" {
 		model = DefaultModel
 	}
+	converted := convertOpenAIConversation(system, messages, deepSeekReplayProfile(cfg))
+	tokenLimit := "max_tokens"
+	if isOfficialOpenAI(cfg.BaseURL) {
+		tokenLimit = "max_completion_tokens"
+		if openAIReasoningModel.MatchString(model) && len(converted) > 0 && converted[0]["role"] == "system" {
+			converted[0]["role"] = "developer"
+		}
+	}
 	body := map[string]interface{}{
 		"model":    model,
-		"messages": convertMessagesToOpenAI(system, messages),
+		"messages": converted,
 		"stream":   true,
 		"stream_options": map[string]interface{}{
 			"include_usage": true,
 		},
-		"tools":      convertToolsToOpenAI(toolDefinitions),
-		"max_tokens": 8192,
+		tokenLimit: 8192,
 	}
-	if effort := NormalizeReasoningEffort(cfg.ReasoningEffort); effort != ReasoningAuto {
+	if tools := convertToolsToOpenAI(toolDefinitions); len(tools) > 0 {
+		body["tools"] = tools
+	}
+	if effort := requestReasoningEffort(cfg); effort != ReasoningAuto {
 		body["reasoning_effort"] = string(effort)
+		if NormalizeReasoningEffort(cfg.ReasoningEffort) == ReasoningXHigh {
+			body[tokenLimit] = 32_768
+		}
 	}
 	payload, _ := json.Marshal(body)
 	return payload
@@ -149,6 +204,10 @@ func buildOpenAIPayloadWithTools(cfg Config, system string, messages []Message, 
 //   - Assistant tool_use blocks become top-level "tool_calls" array
 //   - User tool_result blocks become separate "tool" role messages
 func convertMessagesToOpenAI(system string, messages []Message) []map[string]interface{} {
+	return convertOpenAIConversation(system, messages, "")
+}
+
+func convertOpenAIConversation(system string, messages []Message, reasoningProfile string) []map[string]interface{} {
 	var out []map[string]interface{}
 	var pendingToolIDs []string
 	out = append(out, map[string]interface{}{
@@ -239,6 +298,9 @@ func convertMessagesToOpenAI(system string, messages []Message) []map[string]int
 			m := map[string]interface{}{
 				"role": "assistant",
 			}
+			if reasoningProfile != "" && msg.Reasoning != nil && msg.Reasoning.Profile == reasoningProfile {
+				m["reasoning_content"] = msg.Reasoning.Text
+			}
 			if textContent != "" {
 				m["content"] = textContent
 			} else {
@@ -310,6 +372,7 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 	scanner.Buffer(make([]byte, 0, 1<<20), 4<<20)
 
 	var textBuilder strings.Builder
+	var reasoningBuilder strings.Builder
 	type toolCallAccum struct {
 		ID   string
 		Name string
@@ -335,8 +398,9 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 			} `json:"error"`
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Type     string `json:"type"`
@@ -362,8 +426,14 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 		}
 
 		for _, choice := range event.Choices {
+			if choice.Delta.ReasoningContent != "" {
+				reasoningBuilder.WriteString(choice.Delta.ReasoningContent)
+			}
 			if choice.Delta.Content != "" {
 				textBuilder.WriteString(choice.Delta.Content)
+				if a.structuredTurn {
+					a.emit(Event{Kind: EventTextDelta, Result: choice.Delta.Content})
+				}
 			}
 			for _, tc := range choice.Delta.ToolCalls {
 				if tc.Index < 0 {
@@ -401,12 +471,26 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 
 	// Assemble content blocks in Anthropic format so processResponse works unchanged.
 	var content []map[string]interface{}
+	// DeepSeek's tool continuation needs the original reasoning. Keep it in
+	// the internal history, scoped to the same model and endpoint.
+	if reasoning := strings.TrimSpace(reasoningBuilder.String()); reasoning != "" {
+		if profile := deepSeekReplayProfile(a.Config); profile != "" {
+			content = append(content, map[string]interface{}{
+				"type": "deepseek_reasoning", "profile": profile, "text": reasoningBuilder.String(),
+			})
+		}
+		if !a.structuredTurn {
+			printThinkingMessage(reasoning)
+		}
+	}
 	if textBuilder.Len() > 0 && strings.TrimSpace(textBuilder.String()) != "" {
 		content = append(content, map[string]interface{}{
 			"type": "text",
 			"text": textBuilder.String(),
 		})
-		printAssistantMessage(textBuilder.String())
+		if !a.structuredTurn {
+			printAssistantMessage(textBuilder.String())
+		}
 	}
 
 	indices := make([]int, 0, len(toolCalls))
@@ -423,20 +507,13 @@ func (a *Agent) parseOpenAIStream(body interface{ Read([]byte) (int, error) }) (
 		if tc.Name == "" {
 			return nil, usage, fmt.Errorf("tool call %d is missing a function name", idx)
 		}
-		var input interface{} = map[string]interface{}{}
-		if tc.Args != "" {
-			if err := json.Unmarshal([]byte(tc.Args), &input); err != nil {
-				return nil, usage, fmt.Errorf("tool call %s has invalid arguments: %w", tc.Name, err)
-			}
+		block, err := decodeToolUse(tc.ID, tc.Name, tc.Args, a.structuredTurn)
+		if err != nil {
+			return nil, usage, fmt.Errorf("tool call %s has invalid arguments: %w", tc.Name, err)
 		}
-		content = append(content, map[string]interface{}{
-			"type":  "tool_use",
-			"id":    tc.ID,
-			"name":  tc.Name,
-			"input": input,
-		})
+		content = append(content, block)
 	}
-	if len(content) == 0 {
+	if len(content) == 0 || (len(content) == 1 && content[0]["type"] == "deepseek_reasoning") {
 		return nil, usage, fmt.Errorf("OpenAI-compatible stream ended without text or tool calls")
 	}
 

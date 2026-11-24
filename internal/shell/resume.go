@@ -94,7 +94,7 @@ func newAgentFromSession(cfg *agent.Config, s *agent.Session) *agent.Agent {
 	a := &agent.Agent{
 		Config:           *cfg,
 		Mode:             s.Mode,
-		Workdir:          s.Workdir,
+		ExecEnv:          agent.ExecEnv{Workdir: s.Workdir},
 		RepoRoot:         s.RepoRoot,
 		Intent:           s.Intent,
 		Messages:         s.Messages,

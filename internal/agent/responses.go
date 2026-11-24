@@ -30,7 +30,7 @@ func buildResponsesURL(baseURL string) string {
 	if strings.HasSuffix(strings.ToLower(baseURL), "/responses") {
 		return baseURL
 	}
-	if strings.HasSuffix(strings.ToLower(baseURL), "/v1") {
+	if apiVersionSuffix.MatchString(baseURL) {
 		return baseURL + "/responses"
 	}
 	return baseURL + "/v1/responses"
@@ -52,8 +52,11 @@ func buildResponsesPayloadWithTools(cfg Config, system string, messages []Messag
 	if tools := convertToolsToResponses(toolDefinitions); len(tools) > 0 {
 		body["tools"] = tools
 	}
-	if effort := NormalizeReasoningEffort(cfg.ReasoningEffort); effort != ReasoningAuto {
+	if effort := requestReasoningEffort(cfg); effort != ReasoningAuto {
 		body["reasoning"] = map[string]interface{}{"effort": string(effort)}
+		if NormalizeReasoningEffort(cfg.ReasoningEffort) == ReasoningXHigh {
+			body["max_output_tokens"] = 32_768
+		}
 	}
 	payload, _ := json.Marshal(body)
 	return payload
@@ -211,10 +214,19 @@ type responsesToolCall struct {
 }
 
 func (a *Agent) parseResponsesStream(body io.Reader) ([]byte, Usage, error) {
+	if a.structuredTurn {
+		return decodeResponsesStream(body, false, func(text string) {
+			a.emit(Event{Kind: EventTextDelta, Result: text})
+		})
+	}
 	return parseResponsesStream(body, true)
 }
 
 func parseResponsesStream(body io.Reader, render bool) ([]byte, Usage, error) {
+	return decodeResponsesStream(body, render, nil)
+}
+
+func decodeResponsesStream(body io.Reader, render bool, onDelta func(string)) ([]byte, Usage, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 1<<20), 4<<20)
 	var textBuilder strings.Builder
@@ -263,6 +275,9 @@ func parseResponsesStream(body io.Reader, render bool) ([]byte, Usage, error) {
 		switch event.Type {
 		case "response.output_text.delta":
 			textBuilder.WriteString(event.Delta)
+			if onDelta != nil {
+				onDelta(event.Delta)
+			}
 		case "response.output_text.done":
 			if textBuilder.Len() == 0 {
 				textBuilder.WriteString(event.Text)
@@ -337,15 +352,11 @@ func parseResponsesStream(body io.Reader, render bool) ([]byte, Usage, error) {
 		if call.Name == "" {
 			return nil, usage, fmt.Errorf("Responses tool call %d is missing a function name", index)
 		}
-		var input interface{} = map[string]interface{}{}
-		if call.Args != "" {
-			if err := json.Unmarshal([]byte(call.Args), &input); err != nil {
-				return nil, usage, fmt.Errorf("Responses tool call %s has invalid arguments: %w", call.Name, err)
-			}
+		block, err := decodeToolUse(call.ID, call.Name, call.Args, onDelta != nil)
+		if err != nil {
+			return nil, usage, fmt.Errorf("Responses tool call %s has invalid arguments: %w", call.Name, err)
 		}
-		content = append(content, map[string]interface{}{
-			"type": "tool_use", "id": call.ID, "name": call.Name, "input": input,
-		})
+		content = append(content, block)
 	}
 	if len(content) == 0 {
 		return nil, usage, fmt.Errorf("Responses stream ended without text or tool calls")

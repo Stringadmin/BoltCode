@@ -34,6 +34,35 @@ func TestLoadProfilesEmpty(t *testing.T) {
 	}
 }
 
+func TestDeleteProfile(t *testing.T) {
+	restore := withTempHome(t)
+	defer restore()
+	pf := &ProfileFile{Profiles: []Profile{
+		{Name: "a", APIKey: "k1"},
+		{Name: "b", APIKey: "k2"},
+		{Name: "c", APIKey: "k3"},
+	}, Current: "b"}
+	if err := SaveProfiles(pf); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := DeleteProfile("b"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ := LoadProfiles()
+	if len(loaded.Profiles) != 2 || loaded.Profiles[0].Name != "a" {
+		t.Fatalf("profiles=%+v", loaded.Profiles)
+	}
+	// Current falls back to the first remaining profile.
+	if loaded.Current != "a" {
+		t.Fatalf("current=%q, want a", loaded.Current)
+	}
+
+	if err := DeleteProfile("missing"); err == nil {
+		t.Fatal("expected error for unknown profile")
+	}
+}
+
 func TestLegacyConfigMigration(t *testing.T) {
 	restore := withTempHome(t)
 	defer restore()

@@ -18,6 +18,8 @@ import (
 // can swap in a no-op to avoid real waits; production code uses time.Sleep.
 var sleepFn = time.Sleep
 
+const anthropicAPIVersion = "2023-06-01"
+
 // callAPI sends the current conversation to the API and streams the response.
 // Text content is printed to stdout in real-time as it arrives; tool_use blocks
 // are accumulated and returned as JSON so the agent loop can execute them.
@@ -89,6 +91,17 @@ func (a *Agent) callAPI(system string) ([]byte, Usage, error) {
 			}
 		}
 		a.reportRetry(lastErr, wait)
+		if a.structuredTurn {
+			a.emit(Event{Kind: EventTextReset})
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, Usage{}, ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
 		sleepFn(wait)
 	}
 
@@ -108,13 +121,7 @@ func (a *Agent) doOnce(ctx context.Context, client *http.Client, url string, pay
 		// Malformed request is deterministic — no point retrying.
 		return nil, Usage{}, err, false, 0
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if isAnthropicProvider(a.Config) {
-		req.Header.Set("x-api-key", a.Config.APIKey)
-		req.Header.Set("anthropic-version", "2025-01-25")
-	} else {
-		req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
-	}
+	a.setAPIHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -156,6 +163,18 @@ func (a *Agent) doOnce(ctx context.Context, client *http.Client, url string, pay
 	default:
 		// 4xx (auth, bad request, etc.) is deterministic — don't retry.
 		return nil, Usage{}, fmt.Errorf("%s", msg), false, 0
+	}
+}
+
+func (a *Agent) setAPIHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	if isAnthropicProvider(a.Config) {
+		req.Header.Set("anthropic-version", anthropicAPIVersion)
+		if a.Config.APIKey != "" {
+			req.Header.Set("x-api-key", a.Config.APIKey)
+		}
+	} else if a.Config.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
 	}
 }
 
@@ -328,9 +347,18 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 			case "text_delta":
 				blocks[event.Index].Text += event.Delta.Text
 				// Stream text immediately for real-time feedback (typewriter effect).
-				fmt.Print(event.Delta.Text)
+				if a.structuredTurn {
+					a.emit(Event{Kind: EventTextDelta, Result: event.Delta.Text})
+				} else {
+					fmt.Print(event.Delta.Text)
+				}
 			case "thinking_delta":
 				blocks[event.Index].Text += event.Delta.Thinking
+				// Stream extended thinking dimmed so it reads as background
+				// reasoning next to the assistant's actual answer.
+				if !a.structuredTurn {
+					fmt.Print(ansiDarkGray + event.Delta.Thinking + ansiReset)
+				}
 			case "signature_delta":
 				blocks[event.Index].Signature += event.Delta.Signature
 			case "input_json_delta":
@@ -338,8 +366,9 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 			}
 
 		case "content_block_stop":
-			if event.Index < len(blocks) && blocks[event.Index].Type == "text" && strings.TrimSpace(blocks[event.Index].Text) != "" {
-				// Text was already streamed token-by-token above; just end the paragraph.
+			if !a.structuredTurn && event.Index >= 0 && event.Index < len(blocks) && (blocks[event.Index].Type == "text" || blocks[event.Index].Type == "thinking") && strings.TrimSpace(blocks[event.Index].Text) != "" {
+				// Text and thinking were already streamed token-by-token above;
+				// just end the paragraph.
 				fmt.Println()
 			}
 
@@ -435,18 +464,11 @@ func (a *Agent) parseStream(body interface{ Read([]byte) (int, error) }) ([]byte
 			if b.ID == "" || b.Name == "" {
 				return nil, usage, fmt.Errorf("Anthropic tool call is missing id or name")
 			}
-			var input interface{} = map[string]interface{}{}
-			if b.Input != "" {
-				if err := json.Unmarshal([]byte(b.Input), &input); err != nil {
-					return nil, usage, fmt.Errorf("Anthropic tool call %s has invalid input: %w", b.Name, err)
-				}
+			block, err := decodeToolUse(b.ID, b.Name, b.Input, a.structuredTurn)
+			if err != nil {
+				return nil, usage, fmt.Errorf("Anthropic tool call %s has invalid input: %w", b.Name, err)
 			}
-			content = append(content, map[string]interface{}{
-				"type":  "tool_use",
-				"id":    b.ID,
-				"name":  b.Name,
-				"input": input,
-			})
+			content = append(content, block)
 			hasActionableContent = true
 		}
 	}
@@ -474,7 +496,7 @@ func buildURL(baseURL string) string {
 		return baseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
-	if strings.HasSuffix(baseURL, "/v1") {
+	if apiVersionSuffix.MatchString(baseURL) {
 		return baseURL + "/messages"
 	}
 	return baseURL + "/v1/messages"
@@ -496,7 +518,7 @@ func (a *Agent) callAPINonStreaming() ([]byte, error) {
 		"model":      model,
 		"max_tokens": 1024,
 		"system":     "You are a helpful assistant that summarizes conversation history concisely.",
-		"messages":   a.Messages,
+		"messages":   anthropicMessages(a.Messages),
 		"stream":     false,
 	}
 	payload, _ := json.Marshal(body)
@@ -511,9 +533,7 @@ func (a *Agent) callAPINonStreaming() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", a.Config.APIKey)
-	req.Header.Set("anthropic-version", "2025-01-25")
+	a.setAPIHeaders(req)
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
@@ -567,8 +587,7 @@ func (a *Agent) callOpenAINonStreaming() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
+	a.setAPIHeaders(req)
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
@@ -607,8 +626,7 @@ func (a *Agent) callResponsesNonStreaming() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.Config.APIKey)
+	a.setAPIHeaders(req)
 
 	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
@@ -622,21 +640,4 @@ func (a *Agent) callResponsesNonStreaming() ([]byte, error) {
 	}
 	content, _, err := parseResponsesStream(resp.Body, false)
 	return content, err
-}
-
-// supportsThinking reports whether a model name supports extended thinking.
-// Only Claude 3.5+ and Claude 4 models (anthropic) support it; other providers
-// and older model families are excluded.
-func supportsThinking(model string) bool {
-	m := strings.ToLower(model)
-	// Only enable for known Anthropic model families that support thinking.
-	switch {
-	case strings.Contains(m, "claude-sonnet-4"),
-		strings.Contains(m, "claude-3-5-sonnet"),
-		strings.Contains(m, "claude-opus-4"),
-		strings.Contains(m, "claude-3-opus"),
-		strings.Contains(m, "claude-3.5"):
-		return true
-	}
-	return false
 }

@@ -58,7 +58,7 @@ func TestResumeListNonInteractivePrintsPlainList(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	a := &agent.Agent{
-		Workdir:  home,
+		ExecEnv:  agent.ExecEnv{Workdir: home},
 		Intent:   "write tests",
 		Messages: []agent.Message{{Role: "user", Content: "hi"}},
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/Stringadmin/BoltCode/internal/agent"
 	"github.com/Stringadmin/BoltCode/internal/command"
 	"github.com/Stringadmin/BoltCode/internal/gitx"
+	"github.com/Stringadmin/BoltCode/internal/tui"
 )
 
 func (s *Session) showHelp() {
@@ -55,6 +56,27 @@ func (s *Session) showHelp() {
 
 func (s *Session) runInit() {
 	wd, _ := os.Getwd()
+	// Check the git precondition BEFORE asking anything — otherwise the user
+	// types their name and only then learns init can't work here.
+	if _, err := gitx.Open(wd); err != nil {
+		if !s.scripted {
+			fmt.Println(infoStyle.Render("  当前目录还不是 git 仓库"))
+			choice := s.ask("  在这里运行 git init 吗？(y/n) [y]: ")
+			if choice == "" || strings.EqualFold(choice, "y") {
+				if _, err := gitx.InitRepo(wd); err != nil {
+					fmt.Println(errStyle.Render("  git init 失败: " + err.Error()))
+					return
+				}
+				fmt.Println(okStyle.Render("  ✓ git 仓库已创建"))
+			} else {
+				fmt.Println(infoStyle.Render("  已取消 — 请先 cd 到 git 仓库，或先运行 git init"))
+				return
+			}
+		} else {
+			fmt.Println(errStyle.Render("  not inside a git repository — run 'git init' first"))
+			return
+		}
+	}
 	// Pre-fill the identity from git config so the user can just press Enter.
 	var suggested string
 	if repo, err := gitx.Open(wd); err == nil {
@@ -355,12 +377,31 @@ func (s *Session) runPull() {
 	}
 }
 
-// runConfig handles `config` — manage named API provider profiles. The user can
-// keep several (e.g. anthropic / 火山方舟 / local) and switch with /profile.
-// This wizard lists existing profiles, lets you create a new one or edit an
-// existing one via a navigable field form, and sets the saved one as current.
+// runConfig handles `config`. On a real terminal it opens the full-screen
+// TUI wizard; scripted (piped) sessions keep the line-by-line wizard so
+// tests and automation keep working.
 func (s *Session) runConfig(args []string) {
 	defer s.rl.SetPrompt(mainPrompt)
+	if s.scripted {
+		s.runConfigLegacy(args)
+		return
+	}
+	result, err := tui.RunConfigWizard()
+	if err != nil {
+		fmt.Println(errStyle.Render("  配置界面出错: " + err.Error()))
+		fmt.Println(infoStyle.Render("  回退到文本向导"))
+		s.runConfigLegacy(args)
+		return
+	}
+	if result != nil && result.Saved != "" {
+		fmt.Println(okStyle.Render(fmt.Sprintf("  ✓ 档案 %q 已保存并设为当前", result.Saved)))
+	}
+	fmt.Println(infoStyle.Render("  可运行 run，或在会话中用 /profile 切换档案"))
+}
+
+// runConfigLegacy manages named API provider profiles via a line-by-line
+// wizard. Kept for non-interactive stdin and as a fallback if the TUI fails.
+func (s *Session) runConfigLegacy(args []string) {
 	fmt.Println()
 	fmt.Println(titleStyle.Render("  BoltCode / 服务商配置"))
 	fmt.Println(infoStyle.Render("  API Key 仅保存在本机，并以加密形式写入配置文件"))

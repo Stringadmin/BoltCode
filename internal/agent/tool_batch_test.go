@@ -32,7 +32,7 @@ func TestParallelReadBatchPreservesProviderToolOrder(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "second.txt"), []byte("second-content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := &Agent{Workdir: dir, Stats: NewStats(), UIMode: true, EventFn: func(Event) {}}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: dir}, Stats: NewStats(), UIMode: true, EventFn: func(Event) {}}
 	calls := []ToolCall{
 		{ID: "call_second", Name: "read_file", Input: json.RawMessage(`{"path":"second.txt"}`)},
 		{ID: "call_first", Name: "read_file", Input: json.RawMessage(`{"path":"first.txt"}`)},
@@ -58,7 +58,7 @@ func TestParallelReadBatchPreservesErrorPairing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "exists.txt"), []byte("available"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := &Agent{Workdir: dir, Stats: NewStats(), UIMode: true, EventFn: func(Event) {}}
+	a := &Agent{ExecEnv: ExecEnv{Workdir: dir}, Stats: NewStats(), UIMode: true, EventFn: func(Event) {}}
 	calls := []ToolCall{
 		{ID: "call_missing", Name: "read_file", Input: json.RawMessage(`{"path":"missing.txt"}`)},
 		{ID: "call_exists", Name: "read_file", Input: json.RawMessage(`{"path":"exists.txt"}`)},
